@@ -1,0 +1,137 @@
+version: '3'
+
+vars:
+  APP: gomuse
+  PKG: ./cmd/gomuse
+  BIN_DIR: ./bin
+  BIN: '{{.BIN_DIR}}/{{.APP}}'
+  COVER: coverage.out
+  PORT: '1111'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  deps:
+    desc: Download and verify module dependencies
+    sources:
+      - go.mod
+      - go.sum
+    cmds:
+      - go mod download
+      - go mod verify
+
+  tidy:
+    desc: Tidy go.mod and go.sum
+    cmds:
+      - go mod tidy
+
+  fmt:
+    desc: Format all Go source
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    preconditions:
+      - sh: command -v golangci-lint
+        msg: "golangci-lint not installed — go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
+    cmds:
+      - golangci-lint run ./...
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test ./... {{.CLI_ARGS}}
+
+  test:race:
+    desc: Run tests with the race detector
+    cmds:
+      - go test -race ./... {{.CLI_ARGS}}
+
+  test:cover:
+    desc: Run tests with coverage and print a per-function summary
+    cmds:
+      - go test -coverprofile={{.COVER}} ./...
+      - go tool cover -func={{.COVER}}
+
+  cover:html:
+    desc: Open the coverage report in a browser
+    deps: [test:cover]
+    cmds:
+      - go tool cover -html={{.COVER}}
+
+  build:
+    desc: Build the gomuse binary into ./bin
+    sources:
+      - '**/*.go'
+      - internal/server/web/**/*
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}'
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -o {{.BIN}} {{.PKG}}
+
+  install:
+    desc: Install gomuse into GOBIN
+    cmds:
+      - go install {{.PKG}}
+
+  run:
+    desc: 'Run gomuse (pass args after --, e.g. task run -- stream -demo)'
+    cmds:
+      - go run {{.PKG}} {{.CLI_ARGS}}
+
+  list:
+    desc: Scan for nearby Muse headbands
+    cmds:
+      - go run {{.PKG}} list {{.CLI_ARGS}}
+
+  stream:
+    desc: Connect to a headband and serve the live viewer
+    cmds:
+      - go run {{.PKG}} stream -port {{.PORT}} {{.CLI_ARGS}}
+
+  demo:
+    desc: Serve the viewer with synthetic signals — no headband needed
+    cmds:
+      - go run {{.PKG}} stream -demo -port {{.PORT}} {{.CLI_ARGS}}
+
+  record:
+    desc: 'Record to CSV (e.g. task record -- -dir ./data -duration 60s)'
+    cmds:
+      - go run {{.PKG}} record {{.CLI_ARGS}}
+
+  dev:
+    desc: Rebuild and restart the demo viewer on source changes
+    watch: true
+    sources:
+      - '**/*.go'
+      - internal/server/web/**/*
+    cmds:
+      - task: demo
+
+  check:
+    desc: Run the full pre-commit gate — fmt, vet, lint, race tests, build
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: lint
+      - task: test:race
+      - task: build
+
+  clean:
+    desc: Remove build artifacts and coverage output
+    cmds:
+      - rm -rf {{.BIN_DIR}} {{.COVER}}
+      - go clean -testcache

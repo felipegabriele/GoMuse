@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gomuse — live headband stream</title>
+<link rel="stylesheet" href="/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="ident">
+    <span class="mark">gomuse</span>
+    <span class="tagline">live headband stream</span>
+  </div>
+
+  <div class="link" id="link" data-state="connecting">
+    <span class="link-dot" aria-hidden="true"></span>
+    <span class="link-text" id="linkText">Connecting</span>
+    <span class="link-rate mono" id="linkRate"></span>
+  </div>
+</header>
+
+<div class="console" role="group" aria-label="Display controls">
+  <div class="knob">
+    <span class="knob-label">Amplitude</span>
+    <div class="knob-body">
+      <button type="button" id="scaleDown" aria-label="Halve the vertical scale">
+        <span aria-hidden="true">*</span>
+      </button>
+      <output class="mono" id="scaleValue">100 µV</output>
+      <button type="button" id="scaleUp" aria-label="Double the vertical scale">
+        <span aria-hidden="true">/</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="knob">
+    <span class="knob-label">Window</span>
+    <div class="knob-body">
+      <button type="button" id="windowDown" aria-label="Shorten the window by one second">
+        <span aria-hidden="true">−</span>
+      </button>
+      <output class="mono" id="windowValue">5 s</output>
+      <button type="button" id="windowUp" aria-label="Lengthen the window by one second">
+        <span aria-hidden="true">+</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="knob">
+    <span class="knob-label">Bandpass 1–40 Hz</span>
+    <div class="knob-body">
+      <button type="button" id="filterToggle" class="toggle" aria-pressed="false">
+        <span id="filterLabel">Filter off</span>
+        <kbd>d</kbd>
+      </button>
+    </div>
+  </div>
+</div>
+
+<main>
+  <section class="stage" aria-labelledby="eegHeading">
+    <div class="stage-head">
+      <h2 id="eegHeading">EEG</h2>
+      <p class="stage-note">
+        Five electrodes at <span class="mono" id="eegRate">256</span> Hz.
+        σ is the standard deviation over the visible window.
+      </p>
+    </div>
+    <div class="tape" id="eegChannels" aria-live="off"></div>
+  </section>
+
+  <details class="stage collapsible" id="stage-ppg">
+    <summary><h2>PPG</h2><span class="stage-note">Pulse, raw counts</span></summary>
+    <div class="panel" id="panel-ppg"></div>
+  </details>
+
+  <details class="stage collapsible" id="stage-acc">
+    <summary><h2>Accelerometer</h2><span class="stage-note">X / Y / Z, g</span></summary>
+    <div class="panel" id="panel-acc"></div>
+  </details>
+
+  <details class="stage collapsible" id="stage-gyro">
+    <summary><h2>Gyroscope</h2><span class="stage-note">X / Y / Z, deg/s</span></summary>
+    <div class="panel" id="panel-gyro"></div>
+  </details>
+</main>
+
+<footer class="keys">
+  <span><kbd>/</kbd><kbd>*</kbd> amplitude</span>
+  <span><kbd>+</kbd><kbd>−</kbd> window</span>
+  <span><kbd>d</kbd> filter</span>
+</footer>
+
+<script src="/vendor/uPlot.iife.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

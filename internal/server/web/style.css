@@ -1,0 +1,404 @@
+/* gomuse viewer — a strip-chart recorder for a Muse headband.
+ *
+ * The visual idea is the paper tape of a chart recorder: a ruled surface, a
+ * perforated left edge, and a rail of electrode labels running down it. Only
+ * that rail is allowed to be decorative; everything else stays quiet so the
+ * traces read.
+ *
+ * Colors come from the validated data-viz palette. Both modes are chosen, not
+ * flipped: the dark column is the same hues re-stepped for the dark surface.
+ */
+
+:root {
+  color-scheme: light;
+
+  --surface:        #fcfcfb;
+  --surface-sunk:   #f3f2ee;
+  --surface-raised: #ffffff;
+  --hairline:       #dedcd4;
+  --grid:           #e7e5dd;
+
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7c7a73;
+
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+
+  --good:     #0ca30c;
+  --warning:  #fab219;
+  --critical: #d03b3b;
+
+  --font-display: "Avenir Next Condensed", "Roboto Condensed", "Archivo Narrow",
+                  "Helvetica Neue", system-ui, sans-serif;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --rail: 148px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+
+    --surface:        #1a1a19;
+    --surface-sunk:   #131312;
+    --surface-raised: #232322;
+    --hairline:       #343431;
+    --grid:           #2b2b29;
+
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8e85;
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border: 1px solid var(--hairline);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------- header */
+
+.bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.ident { display: flex; align-items: baseline; gap: 10px; }
+
+.mark {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.tagline {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.link-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-muted) 22%, transparent);
+}
+
+.link[data-state="live"] .link-dot {
+  background: var(--good);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent);
+}
+.link[data-state="connecting"] .link-dot { background: var(--warning); }
+.link[data-state="down"] .link-dot { background: var(--critical); }
+
+.link-rate { color: var(--text-muted); }
+
+/* --------------------------------------------------------------- console */
+
+.console {
+  display: flex;
+  gap: 26px;
+  flex-wrap: wrap;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface-sunk);
+}
+
+.knob { display: flex; flex-direction: column; gap: 5px; }
+
+.knob-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.knob-body { display: flex; align-items: stretch; gap: 6px; }
+
+.knob-body button {
+  font: inherit;
+  font-family: var(--font-mono);
+  min-width: 30px;
+  padding: 5px 9px;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.knob-body button:hover { border-color: var(--text-muted); }
+.knob-body button:active { background: var(--surface-sunk); }
+
+:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+
+.knob-body output {
+  display: inline-flex;
+  align-items: center;
+  min-width: 72px;
+  justify-content: center;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-ui) !important;
+}
+
+.toggle[aria-pressed="true"] {
+  background: var(--series-1);
+  border-color: var(--series-1);
+  color: #fff;
+}
+.toggle[aria-pressed="true"] kbd {
+  background: color-mix(in srgb, #000 18%, transparent);
+  border-color: color-mix(in srgb, #fff 45%, transparent);
+  color: #fff;
+}
+
+/* ---------------------------------------------------------------- stages */
+
+main { padding: 8px 20px 32px; }
+
+.stage { margin: 18px 0; }
+
+.stage h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.stage-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.collapsible > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 9px 0;
+  border-top: 1px solid var(--hairline);
+  cursor: pointer;
+  list-style: none;
+}
+.collapsible > summary::-webkit-details-marker { display: none; }
+.collapsible > summary::before {
+  content: "+";
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+.collapsible[open] > summary::before { content: "−"; }
+
+/* The tape: a ruled surface with a perforated left edge, the one place this
+   viewer is allowed to look like the instrument it imitates. */
+.tape {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.channel {
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  align-items: stretch;
+  border-bottom: 1px solid var(--hairline);
+}
+.channel:last-child { border-bottom: none; }
+
+.rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 10px 14px 10px 22px;
+  border-right: 1px solid var(--hairline);
+  background: var(--surface-sunk);
+}
+
+/* Sprocket holes down the left edge. */
+.rail::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 7px;
+  width: 5px;
+  background-image: radial-gradient(circle at 2.5px 4px,
+      var(--hairline) 2px, transparent 2.2px);
+  background-size: 5px 14px;
+}
+
+.electrode {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.sigma {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.quality {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.quality-bar {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--grid);
+  overflow: hidden;
+}
+
+.quality-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 2px;
+  background: var(--good);
+  transition: width 120ms linear;
+}
+
+.quality[data-level="warning"] .quality-fill { background: var(--warning); }
+.quality[data-level="critical"] .quality-fill { background: var(--critical); }
+
+.plot { min-width: 0; padding: 4px 8px 4px 0; overflow: hidden; }
+
+.panel {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  padding: 8px 10px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.panel-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 6px 2px 2px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.stat { display: inline-flex; align-items: center; gap: 6px; }
+
+.stat i {
+  width: 9px; height: 9px;
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px var(--surface-raised);
+}
+
+.stat b { font-weight: 600; letter-spacing: 0.06em; }
+.stat em { font-style: normal; color: var(--text-muted); }
+
+/* --------------------------------------------------------------- uPlot */
+
+.uplot { font-family: var(--font-mono); }
+.u-legend { font-size: 11px; padding-top: 4px; }
+.u-legend .u-marker { border-radius: 2px; }
+.u-legend th, .u-legend td { font-weight: 400; color: var(--text-secondary); }
+.u-select { background: color-mix(in srgb, var(--series-1) 12%, transparent); }
+
+.keys {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  padding: 14px 20px 24px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.keys span { display: inline-flex; align-items: center; gap: 5px; }
+
+@media (max-width: 560px) {
+  :root { --rail: 104px; }
+  .rail { padding-left: 18px; }
+  .quality span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; }
+}

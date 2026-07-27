@@ -1,0 +1,21 @@
+# Build output
+/gomuse
+/bin/
+*.exe
+
+# Recordings
+/recordings/
+*.csv
+
+# Task runner checksum cache
+/.task/
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Editor and OS cruft
+.DS_Store
+.idea/
+.vscode/
