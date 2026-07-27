@@ -65,12 +65,18 @@ type Config struct {
 	Addr string
 	// Hub is the source of sample chunks. Required.
 	Hub *hub.Hub
+	// Streams describes the connected headband's streams. The viewer builds
+	// its entire UI from this, so it must match what the source publishes: an
+	// Athena's EEG is 4 channels where a classic headband's is 5. Nil means
+	// the classic layout.
+	Streams *sample.Set
 }
 
 // Server serves the viewer app and the sample WebSocket.
 type Server struct {
 	cfg     Config
 	mux     *http.ServeMux
+	codec   *wire.Codec
 	clients atomic.Int64
 
 	// shutdown is closed when ListenAndServe's context is cancelled, which
@@ -111,7 +117,15 @@ func New(cfg Config) *Server {
 	if cfg.Hub == nil {
 		panic("server: Config.Hub is required")
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), shutdown: make(chan struct{})}
+	if cfg.Streams == nil {
+		cfg.Streams = sample.Classic()
+	}
+	s := &Server{
+		cfg:      cfg,
+		mux:      http.NewServeMux(),
+		shutdown: make(chan struct{}),
+		codec:    wire.NewCodec(cfg.Streams),
+	}
 
 	root, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -173,10 +187,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // hello builds the metadata message for a new client.
-func hello() Hello {
+func hello(streams *sample.Set) Hello {
 	h := Hello{Type: "hello"}
-	for _, id := range sample.All() {
-		m := sample.MetaFor(id)
+	for _, id := range streams.All() {
+		m := streams.MetaFor(id)
 		h.Streams = append(h.Streams, StreamInfo{
 			ID:               int(id),
 			Name:             m.Name,
@@ -198,7 +212,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept has already written the error response.
 	}
-	defer conn.CloseNow()
+	defer func() {
+		_ = conn.CloseNow()
+	}()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -215,7 +231,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.clients.Add(1)
 	defer s.clients.Add(-1)
 
-	msg, err := json.Marshal(hello())
+	msg, err := json.Marshal(hello(s.cfg.Streams))
 	if err != nil {
 		return
 	}
@@ -229,7 +245,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	chunks, unsubscribe := s.cfg.Hub.Subscribe(subscriberBuffer)
 	defer unsubscribe()
 
-	cl := newClient()
+	cl := newClient(s.cfg.Streams)
 	go cl.readLoop(ctx, cancel, conn)
 
 	for {
@@ -239,11 +255,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case c, ok := <-chunks:
 			if !ok {
 				// The hub closed: the capture is over.
-				conn.Close(websocket.StatusNormalClosure, "stream ended")
+				_ = conn.Close(websocket.StatusNormalClosure, "stream ended")
 				return
 			}
 			wctx, wcancel := context.WithTimeout(ctx, writeTimeout)
-			err := conn.Write(wctx, websocket.MessageBinary, wire.EncodeChunk(cl.prepare(c)))
+			err := conn.Write(wctx, websocket.MessageBinary, s.codec.EncodeChunk(cl.prepare(c)))
 			wcancel()
 			if err != nil {
 				return
@@ -269,8 +285,16 @@ type client struct {
 	dc   *dsp.DCBlockerBank
 }
 
-func newClient() *client {
-	m := sample.MetaFor(sample.EEG)
+// newClient sizes the per-viewer DSP to the connected headband's EEG stream:
+// the filter banks carry one history per channel, so a 4-channel Athena and a
+// 5-channel classic headband need differently shaped state.
+func newClient(streams *sample.Set) *client {
+	m, ok := streams.Meta(sample.EEG)
+	if !ok {
+		// No EEG on this device: the banks are never used, but they must not
+		// be nil, and a zero-channel bank is valid.
+		m = sample.Meta{Rate: 256}
+	}
 	nch, rate := m.NumChannels(), m.Rate
 	return &client{
 		bank: dsp.NewBank(dsp.FirwinBandpass(filterTaps, filterLow, filterHigh, rate), nch),

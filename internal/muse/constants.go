@@ -30,6 +30,22 @@ const (
 	CharPPG3 = "273e0011-4c4d-454d-96be-f03bac821358"
 )
 
+// Muse S Athena (hardware "Athena_RevE"/"Athena_RevF", firmware 3.x) replaces
+// the whole per-channel characteristic set below with multiplexed data
+// characteristics. It keeps 273e0001 for control, so it connects and answers
+// "v1"/"s" happily and only diverges once data is wanted. See athena.go.
+//
+// Data1 and Data2 both carry tagged sensor blocks; 273e0015 is exposed by the
+// headband but unused, here only so that the layout can be recognised.
+const (
+	CharAthenaData1 = "273e0013-4c4d-454d-96be-f03bac821358"
+	CharAthenaData2 = "273e0014-4c4d-454d-96be-f03bac821358"
+	CharAthenaAux   = "273e0015-4c4d-454d-96be-f03bac821358"
+)
+
+// AthenaCharUUIDs lists the characteristics unique to the Athena layout.
+var AthenaCharUUIDs = []string{CharAthenaData1, CharAthenaData2, CharAthenaAux}
+
 // EEGChannelUUIDs lists the EEG characteristics in channel order, so that the
 // index into this slice is the index into a Chunk's channel dimension.
 //

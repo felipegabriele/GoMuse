@@ -265,8 +265,8 @@ func pulseShape(ph float64) float64 {
 	if ph < 0 {
 		ph += 1
 	}
-	systolic := math.Exp(-math.Pow(ph-0.14, 2) / 0.004)
-	dicrotic := 0.42 * math.Exp(-math.Pow(ph-0.36, 2)/0.010)
+	systolic := math.Exp(-(ph - 0.14) * (ph - 0.14) / 0.004)
+	dicrotic := 0.42 * math.Exp(-(ph-0.36)*(ph-0.36)/0.010)
 	return systolic + dicrotic
 }
 

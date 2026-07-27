@@ -47,7 +47,9 @@ func dial(t *testing.T, ts *httptest.Server) (*websocket.Conn, Hello) {
 	if err != nil {
 		t.Fatalf("dial %s: %v", url, err)
 	}
-	t.Cleanup(func() { conn.CloseNow() })
+	t.Cleanup(func() {
+		_ = conn.CloseNow()
+	})
 
 	typ, data, err := conn.Read(ctx)
 	if err != nil {
@@ -125,10 +127,12 @@ func get(t *testing.T, ts *httptest.Server, path string) (*http.Response, []byte
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
-	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("closing %s: %v", path, err)
 	}
 	return resp, body
 }
@@ -202,7 +206,9 @@ func TestHealthz(t *testing.T) {
 		var h2 Health
 		return json.Unmarshal(b, &h2) == nil && h2.Clients == 1
 	})
-	conn.CloseNow()
+	if err := conn.CloseNow(); err != nil {
+		t.Fatalf("close WebSocket: %v", err)
+	}
 	_ = h
 }
 
@@ -467,7 +473,9 @@ func TestPublishAfterServerClosedDoesNotPanic(t *testing.T) {
 	readChunkMatching(t, conn, sample.ACC)
 
 	// A hard drop with no close handshake, as a browser tab being killed.
-	conn.CloseNow()
+	if err := conn.CloseNow(); err != nil {
+		t.Fatalf("close WebSocket: %v", err)
+	}
 	waitFor(t, "the client to be reaped", func() bool { return s.Clients() == 0 })
 	h.Publish(constChunk(sample.EEG, 1700000000, 1))
 }
@@ -534,3 +542,80 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// newAthenaTestServer builds a server for a headband whose streams are not the
+// classic ones, which is the case the device-dependent metadata exists for.
+func newAthenaTestServer(t *testing.T) (*hub.Hub, *httptest.Server) {
+	t.Helper()
+	h := hub.New()
+	s := New(Config{Hub: h, Streams: sample.Athena()})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		h.Close()
+	})
+	return h, ts
+}
+
+func TestHelloDescribesTheConnectedDeviceNotTheClassicDefault(t *testing.T) {
+	_, ts := newAthenaTestServer(t)
+	_, hello := dial(t, ts)
+
+	athena := sample.Athena()
+	if len(hello.Streams) != len(athena.All()) {
+		t.Fatalf("%d streams, want %d", len(hello.Streams), len(athena.All()))
+	}
+	for _, s := range hello.Streams {
+		if sample.StreamID(s.ID) == sample.PPG {
+			t.Error("hello advertises PPG, which an Athena does not have")
+		}
+		if sample.StreamID(s.ID) != sample.EEG {
+			continue
+		}
+		// The viewer draws one trace per channel named here, so a stale
+		// 5-channel default would render a phantom Right AUX trace.
+		if len(s.Channels) != 4 {
+			t.Errorf("EEG has %d channels, want 4: %v", len(s.Channels), s.Channels)
+		}
+		for _, name := range s.Channels {
+			if name == "Right AUX" {
+				t.Error("EEG advertises Right AUX, which an Athena does not have")
+			}
+		}
+	}
+}
+
+func TestAthenaEEGChunkSurvivesTheRoundTrip(t *testing.T) {
+	h, ts := newAthenaTestServer(t)
+	conn, _ := dial(t, ts)
+
+	// A 4-channel chunk would be rejected by a codec still validating against
+	// the classic 5-channel layout.
+	want := sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{1000, 1000.00390625},
+		Data:       [][]float64{{1, 2}, {3, 4}, {5, 6}, {7, 8}},
+	}
+	go publishUntilReceived(t, h, want)
+
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("reading frame: %v", err)
+	}
+	if typ != websocket.MessageBinary {
+		t.Fatalf("frame type = %v, want binary", typ)
+	}
+
+	got, err := wire.NewCodec(sample.Athena()).DecodeChunk(data)
+	if err != nil {
+		t.Fatalf("decoding frame: %v", err)
+	}
+	if got.NumChannels() != 4 {
+		t.Errorf("got %d channels, want 4", got.NumChannels())
+	}
+	if got.Stream != sample.EEG {
+		t.Errorf("stream = %d, want EEG", got.Stream)
+	}
+}

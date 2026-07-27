@@ -39,22 +39,51 @@ type Control struct {
 	Window *float64 `json:"window,omitempty"`
 }
 
+// Codec encodes and decodes frames for one device's stream set.
+//
+// The channel count of a stream is a property of the headband — a classic
+// Muse S has 5 EEG channels, an Athena 4 — so decoding validates against the
+// set the device actually reported rather than a package global. Encoding needs
+// it only for the nominal period of a single-sample chunk.
+type Codec struct {
+	streams *sample.Set
+}
+
+// NewCodec returns a Codec for the given device stream set.
+func NewCodec(streams *sample.Set) *Codec {
+	if streams == nil {
+		streams = sample.Classic()
+	}
+	return &Codec{streams: streams}
+}
+
 // dtFor returns the sample period to advertise for a chunk. With more than one
 // sample it is measured from the chunk's own timestamps, so the browser sees
 // the dejittered real rate rather than the nominal one; with a single sample
 // there is nothing to measure and we fall back to the nominal period.
-func dtFor(c sample.Chunk) float64 {
+func (co *Codec) dtFor(c sample.Chunk) float64 {
 	if n := c.NumSamples(); n > 1 {
 		return (c.Timestamps[n-1] - c.Timestamps[0]) / float64(n-1)
 	}
-	return sample.MetaFor(c.Stream).Period()
+	if m, ok := co.streams.Meta(c.Stream); ok {
+		return m.Period()
+	}
+	return 0
 }
+
+// EncodeChunk serialises a chunk into a single frame using the classic stream
+// set. Prefer Codec.EncodeChunk where a device is in play.
+func EncodeChunk(c sample.Chunk) []byte { return NewCodec(sample.Classic()).EncodeChunk(c) }
+
+// DecodeChunk parses a frame against the classic stream set. Prefer
+// Codec.DecodeChunk where a device is in play.
+func DecodeChunk(b []byte) (sample.Chunk, error) { return NewCodec(sample.Classic()).DecodeChunk(b) }
 
 // EncodeChunk serialises a chunk into a single frame.
 //
 // The chunk is assumed to be well formed: every channel slice as long as
 // Timestamps, as produced by the BLE decoder.
-func EncodeChunk(c sample.Chunk) []byte {
+func (co *Codec) EncodeChunk(c sample.Chunk) []byte {
 	nchan := c.NumChannels()
 	nsamp := c.NumSamples()
 
@@ -68,7 +97,7 @@ func EncodeChunk(c sample.Chunk) []byte {
 		t0 = c.Timestamps[0]
 	}
 	binary.LittleEndian.PutUint64(b[4:12], math.Float64bits(t0))
-	binary.LittleEndian.PutUint32(b[12:16], math.Float32bits(float32(dtFor(c))))
+	binary.LittleEndian.PutUint32(b[12:16], math.Float32bits(float32(co.dtFor(c))))
 
 	off := HeaderSize
 	for ch := 0; ch < nchan; ch++ {
@@ -86,20 +115,14 @@ func EncodeChunk(c sample.Chunk) []byte {
 // Timestamps are reconstructed as t0 + i*dt: the frame carries the period, not
 // each individual instant, so a chunk that went in with jittered timestamps
 // comes back evenly spaced.
-func DecodeChunk(b []byte) (sample.Chunk, error) {
+func (co *Codec) DecodeChunk(b []byte) (sample.Chunk, error) {
 	var c sample.Chunk
 	if len(b) < HeaderSize {
 		return c, fmt.Errorf("wire: frame too short: %d bytes, need at least %d", len(b), HeaderSize)
 	}
 
 	id := sample.StreamID(b[0])
-	var known bool
-	for _, s := range sample.All() {
-		if s == id {
-			known = true
-			break
-		}
-	}
+	m, known := co.streams.Meta(id)
 	if !known {
 		return c, fmt.Errorf("wire: unknown stream id %d", b[0])
 	}
@@ -108,9 +131,9 @@ func DecodeChunk(b []byte) (sample.Chunk, error) {
 	if nchan == 0 {
 		return c, fmt.Errorf("wire: zero channels")
 	}
-	if want := sample.MetaFor(id).NumChannels(); nchan != want {
+	if want := m.NumChannels(); nchan != want {
 		return c, fmt.Errorf("wire: stream %s has %d channels, frame declares %d",
-			sample.MetaFor(id).Name, want, nchan)
+			m.Name, want, nchan)
 	}
 	nsamp := int(binary.LittleEndian.Uint16(b[2:4]))
 

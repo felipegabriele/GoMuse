@@ -92,10 +92,12 @@ func readCSV(t *testing.T, path string) [][]string {
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
-	defer f.Close()
 	recs, err := csv.NewReader(f).ReadAll()
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
 	}
 	return recs
 }

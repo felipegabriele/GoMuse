@@ -111,6 +111,10 @@ type Config struct {
 	Streams map[sample.StreamID]bool
 	// ScanTimeout bounds the discovery phase when Address is empty.
 	ScanTimeout time.Duration
+	// Warn, if set, receives non-fatal problems worth telling the user about,
+	// such as asking for a stream this headband does not have. The package
+	// does no printing of its own.
+	Warn func(string)
 }
 
 func (c Config) wants(id sample.StreamID) bool {
@@ -136,11 +140,43 @@ type Client struct {
 	control bluetooth.DeviceCharacteristic
 	publish func(sample.Chunk)
 
+	// streams describes what this particular headband produces. It is set
+	// during setup, because it depends on which generation answered.
+	streams *sample.Set
+	// athena is non-nil when the headband speaks the Athena protocol.
+	athena *athenaStreamer
+
+	// warnf reports a non-fatal problem. A field so tests can capture it.
+	warnf func(string)
+
 	mu       sync.Mutex
 	lastData time.Time
 
 	closeOnce sync.Once
 }
+
+// Streams returns the metadata of the connected headband's streams. It is
+// valid once Connect has returned successfully.
+func (c *Client) Streams() *sample.Set { return c.streams }
+
+// Battery returns the last reported battery percentage, or 0 if the headband
+// has not reported one. Only the Athena protocol carries it.
+func (c *Client) Battery() float64 {
+	if c.athena == nil {
+		return 0
+	}
+	return c.athena.battery()
+}
+
+func (c *Client) warn(msg string) {
+	if c.warnf != nil {
+		c.warnf(msg)
+	}
+}
+
+// errNoControl is returned when the headband has no control characteristic,
+// which no Muse generation should ever do.
+var errNoControl = errors.New("muse: control characteristic not found")
 
 // Connect finds a headband, subscribes to the configured streams, and starts
 // it streaming. publish is called from BLE callback goroutines and must not
@@ -163,7 +199,7 @@ func Connect(ctx context.Context, cfg Config, publish func(sample.Chunk)) (*Clie
 		return nil, fmt.Errorf("connect to %s: %w", addr.String(), err)
 	}
 
-	c := &Client{dev: dev, publish: publish, lastData: time.Now()}
+	c := &Client{dev: dev, publish: publish, lastData: time.Now(), warnf: cfg.Warn}
 	if err := c.setup(cfg); err != nil {
 		_ = dev.Disconnect()
 		return nil, err
@@ -242,16 +278,28 @@ func (c *Client) setup(cfg Config) error {
 	}
 	svc := svcs[0]
 
-	chars, err := discoverChars(svc, cfg)
+	chars, present, err := discoverChars(svc)
 	if err != nil {
 		return err
 	}
 
+	// Which protocol this headband speaks is decided by what it exposes, not
+	// by anything it advertises: an Athena is indistinguishable from a classic
+	// Muse S until its characteristics are in hand.
+	if isAthena(present) {
+		return c.setupAthena(chars, cfg)
+	}
+
+	if missing := missingChars(present, cfg); len(missing) > 0 {
+		return unsupportedDevice(present, missing)
+	}
+
 	ctrl, ok := chars[CharControl]
 	if !ok {
-		return errors.New("muse: control characteristic not found")
+		return errNoControl
 	}
 	c.control = ctrl
+	c.streams = sample.Classic()
 
 	if err := c.writeCommand(c.preset(cfg)); err != nil {
 		return fmt.Errorf("select preset: %w", err)
@@ -274,9 +322,36 @@ func (c *Client) setup(cfg Config) error {
 	return nil
 }
 
-// discoverChars looks up every characteristic the config needs, in one round
-// trip, and returns them keyed by UUID string.
-func discoverChars(svc bluetooth.DeviceService, cfg Config) (map[string]bluetooth.DeviceCharacteristic, error) {
+// discoverChars fetches the service's characteristics in one round trip.
+//
+// It asks for every characteristic rather than the specific ones it wants,
+// because the underlying discovery is all-or-nothing: one absent UUID makes it
+// discard the whole result and return "did not find all requested
+// characteristic", naming neither the device nor the characteristic. Matching
+// here instead lets us say exactly what is missing, and tell an Athena from a
+// classic headband at all.
+//
+// It returns the characteristics keyed by UUID, and the set of UUIDs present,
+// which is what tells the generations apart. Validating against a config is the
+// caller's job, since the two protocols need different characteristics.
+func discoverChars(svc bluetooth.DeviceService) (map[string]bluetooth.DeviceCharacteristic, map[string]bool, error) {
+	found, err := svc.DiscoverCharacteristics(nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("discover characteristics: %w", err)
+	}
+
+	out := make(map[string]bluetooth.DeviceCharacteristic, len(found))
+	present := make(map[string]bool, len(found))
+	for _, ch := range found {
+		uuid := ch.UUID().String()
+		out[uuid] = ch
+		present[uuid] = true
+	}
+	return out, present, nil
+}
+
+// requiredChars lists the characteristics cfg needs, in a stable order.
+func requiredChars(cfg Config) []string {
 	want := []string{CharControl}
 	if cfg.wants(sample.EEG) {
 		want = append(want, EEGChannelUUIDs...)
@@ -290,26 +365,113 @@ func discoverChars(svc bluetooth.DeviceService, cfg Config) (map[string]bluetoot
 	if cfg.wants(sample.Gyro) {
 		want = append(want, CharGyro)
 	}
+	return want
+}
 
-	uuids := make([]bluetooth.UUID, 0, len(want))
-	for _, s := range want {
-		u, err := bluetooth.ParseUUID(s)
-		if err != nil {
-			return nil, err
+// missingChars reports which required characteristics the device does not
+// expose, in requiredChars order.
+func missingChars(present map[string]bool, cfg Config) []string {
+	var missing []string
+	for _, uuid := range requiredChars(cfg) {
+		if !present[uuid] {
+			missing = append(missing, uuid)
 		}
-		uuids = append(uuids, u)
+	}
+	return missing
+}
+
+// isAthena reports whether the device exposes the Muse S Athena layout — the
+// three multiplexed characteristics in place of the classic per-channel ones.
+// Both halves of the test matter: the Athena characteristics must be there,
+// and the classic EEG ones must not, so that a future firmware which grows
+// 273e0013..15 alongside the old layout is not misreported as unsupported.
+func isAthena(present map[string]bool) bool {
+	for _, uuid := range AthenaCharUUIDs {
+		if !present[uuid] {
+			return false
+		}
+	}
+	return !present[CharTP9]
+}
+
+// charLabel names a characteristic for an error message, falling back to the
+// bare UUID for anything we have no name for.
+func charLabel(uuid string) string {
+	switch uuid {
+	case CharControl:
+		return "control"
+	case CharTP9:
+		return "EEG TP9"
+	case CharAF7:
+		return "EEG AF7"
+	case CharAF8:
+		return "EEG AF8"
+	case CharTP10:
+		return "EEG TP10"
+	case CharRightAUX:
+		return "EEG AUX"
+	case CharPPG1:
+		return "PPG ambient"
+	case CharPPG2:
+		return "PPG infrared"
+	case CharPPG3:
+		return "PPG red"
+	case CharAccelerometer:
+		return "accelerometer"
+	case CharGyro:
+		return "gyroscope"
+	}
+	return uuid
+}
+
+// disableHint suggests the flags that would drop the streams whose
+// characteristics are absent, so a headband missing only PPG (a Muse 2016, for
+// instance) is one flag away from working rather than a dead end.
+func disableHint(missing []string) string {
+	var flags []string
+	seen := map[string]bool{}
+	add := func(f string) {
+		if !seen[f] {
+			seen[f] = true
+			flags = append(flags, f)
+		}
+	}
+	for _, uuid := range missing {
+		switch uuid {
+		case CharTP9, CharAF7, CharAF8, CharTP10, CharRightAUX:
+			add("-eeg=false")
+		case CharPPG1, CharPPG2, CharPPG3:
+			add("-ppg=false")
+		case CharAccelerometer:
+			add("-acc=false")
+		case CharGyro:
+			add("-gyro=false")
+		}
+	}
+	return strings.Join(flags, " ")
+}
+
+// unsupportedDevice turns a set of missing characteristics into an error that
+// says what the headband is, rather than that a lookup failed.
+func unsupportedDevice(present map[string]bool, missing []string) error {
+	// An Athena never reaches here — setup branches to setupAthena before
+	// validating against the classic layout — but if that branch is ever
+	// reordered, say so rather than listing ten missing UUIDs.
+	if isAthena(present) {
+		return errors.New("muse: headband uses the Athena layout but was routed " +
+			"down the classic path (this is a bug in gomuse)")
 	}
 
-	found, err := svc.DiscoverCharacteristics(uuids)
-	if err != nil {
-		return nil, fmt.Errorf("discover characteristics: %w", err)
+	labels := make([]string, len(missing))
+	for i, uuid := range missing {
+		labels[i] = charLabel(uuid)
 	}
-
-	out := make(map[string]bluetooth.DeviceCharacteristic, len(found))
-	for _, ch := range found {
-		out[ch.UUID().String()] = ch
+	err := fmt.Errorf("muse: headband does not expose %d of the characteristics needed: %s",
+		len(missing), strings.Join(labels, ", "))
+	if hint := disableHint(missing); hint != "" {
+		return fmt.Errorf("%w (try %s to stream the rest)", err, hint)
 	}
-	return out, nil
+	return err
 }
 
 func (c *Client) preset(cfg Config) []byte {
@@ -448,6 +610,12 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-keepAlive.C:
+			// The Athena needs no keep-alive and muse-lsl sends it none; it
+			// streams until told to stop. Sending the classic "k" at it would
+			// be an untested command on a live stream for no benefit.
+			if c.athena != nil {
+				continue
+			}
 			if err := c.writeString("k"); err != nil {
 				return fmt.Errorf("keep-alive: %w", err)
 			}

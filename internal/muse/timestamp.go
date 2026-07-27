@@ -84,6 +84,37 @@ func (d *Dejitter) Next(packetIndex uint16, arrival float64) []float64 {
 	return ts
 }
 
+// NextArrival records a packet of n samples received at the given wall-clock
+// time (in seconds) and returns dejittered timestamps for them.
+//
+// It is the entry point for the Athena protocol, which has no per-stream packet
+// counter to key off: several streams are multiplexed into one notification
+// stream, so a lost packet shows up only as a larger arrival interval and there
+// is no equivalent of Next's gap handling. muse-lsl's athena.py behaves the
+// same way — its RLSTimestampCorrector consumes n samples per call and never
+// inspects an index — so a drop shifts the fit rather than being counted.
+//
+// The samplesPerPacket given to NewDejitter is unused here, since Athena packet
+// sizes vary by sensor tag (an EEG packet carries 4 samples on tag 0x11 and 2
+// on tag 0x12).
+func (d *Dejitter) NextArrival(n int, arrival float64) []float64 {
+	if n <= 0 {
+		return nil
+	}
+	start := d.sampleIndex
+	d.sampleIndex += int64(n)
+
+	// As in Next, the fit is anchored on the chunk's last sample: arrival is
+	// observed once the whole packet has been received.
+	d.update(float64(start+int64(n)-1), arrival)
+
+	ts := make([]float64, n)
+	for i := range ts {
+		ts[i] = d.slope*float64(start+int64(i)) + d.offset
+	}
+	return ts
+}
+
 // maxPlausibleGap bounds how many missing packets we will believe in. Beyond
 // half the counter range a positive gap is indistinguishable from a packet
 // arriving out of order, so we treat it as reordering and leave the index

@@ -40,6 +40,121 @@ func (m Meta) NumChannels() int { return len(m.Channels) }
 // Period returns the nominal seconds between consecutive samples.
 func (m Meta) Period() float64 { return 1 / m.Rate }
 
+// Set is the stream metadata of one connected device.
+//
+// The shape of the data is a property of the device, not a global constant: a
+// classic Muse 2 / Muse S has 5 EEG channels and 3 PPG channels, while a Muse S
+// Athena has 4 EEG channels and no PPG at all. Every layer that needs to know
+// how wide a stream is — the wire encoder, the recorder's CSV header, the
+// viewer's hello message — takes a Set rather than consulting a package global,
+// so that connecting a different headband cannot silently produce frames whose
+// channel count disagrees with what the browser was told.
+//
+// A Set is immutable once built and safe for concurrent use.
+type Set struct {
+	metas map[StreamID]Meta
+	order []StreamID
+}
+
+// NewSet builds a Set from the given metadata, preserving wire order: the
+// caller lists streams in ascending StreamID, and All returns them that way.
+func NewSet(metas ...Meta) *Set {
+	s := &Set{metas: make(map[StreamID]Meta, len(metas))}
+	for _, m := range metas {
+		if _, dup := s.metas[m.ID]; dup {
+			panic("sample: duplicate stream id in set")
+		}
+		s.metas[m.ID] = m
+		s.order = append(s.order, m.ID)
+	}
+	sortIDs(s.order)
+	return s
+}
+
+// sortIDs orders stream IDs ascending. Insertion sort: a Set holds a handful of
+// streams, and this keeps package sample free of imports as documented above.
+func sortIDs(ids []StreamID) {
+	for i := 1; i < len(ids); i++ {
+		for j := i; j > 0 && ids[j] < ids[j-1]; j-- {
+			ids[j], ids[j-1] = ids[j-1], ids[j]
+		}
+	}
+}
+
+// Has reports whether the device exposes the stream.
+func (s *Set) Has(id StreamID) bool {
+	_, ok := s.metas[id]
+	return ok
+}
+
+// Meta returns the stream's metadata and whether the device exposes it.
+func (s *Set) Meta(id StreamID) (Meta, bool) {
+	m, ok := s.metas[id]
+	return m, ok
+}
+
+// MetaFor returns the stream's metadata, panicking if the device does not
+// expose it. Use it where the stream is known to be present — a chunk that came
+// from this device, say — and Meta elsewhere.
+func (s *Set) MetaFor(id StreamID) Meta {
+	m, ok := s.metas[id]
+	if !ok {
+		panic("sample: stream not in set")
+	}
+	return m
+}
+
+// All returns the device's stream IDs in wire order.
+func (s *Set) All() []StreamID {
+	out := make([]StreamID, len(s.order))
+	copy(out, s.order)
+	return out
+}
+
+// Classic returns the stream set of a Muse 2 / Muse S (pre-Athena): 5 EEG
+// channels including Right AUX, 3 PPG channels, and the two IMU streams.
+func Classic() *Set {
+	return NewSet(metas[EEG], metas[PPG], metas[ACC], metas[Gyro])
+}
+
+// Athena returns the stream set of a Muse S Athena (Gen 3).
+//
+// Its EEG is 4 channels, not 5: the headband reports 8 channels on tag 0x12 but
+// only TP9/AF7/AF8/TP10 are electrode signals, matching what muse-lsl's
+// athena.py forwards. It has no PPG characteristic — the equivalent is a
+// 16-channel optics stream that gomuse decodes but does not yet publish.
+//
+// SamplesPerPacket is the largest a packet carries (tag 0x11 packs 4 EEG
+// samples, 0x12 packs 2), since it is a sizing hint rather than a guarantee.
+func Athena() *Set {
+	return NewSet(
+		Meta{
+			ID:               EEG,
+			Name:             "eeg",
+			Channels:         []string{"TP9", "AF7", "AF8", "TP10"},
+			Unit:             "uV",
+			Rate:             256,
+			SamplesPerPacket: 4,
+		},
+		Meta{
+			ID:               ACC,
+			Name:             "acc",
+			Channels:         []string{"X", "Y", "Z"},
+			Unit:             "g",
+			Rate:             52,
+			SamplesPerPacket: 3,
+		},
+		Meta{
+			ID:               Gyro,
+			Name:             "gyro",
+			Channels:         []string{"X", "Y", "Z"},
+			Unit:             "dps",
+			Rate:             52,
+			SamplesPerPacket: 3,
+		},
+	)
+}
+
 var metas = map[StreamID]Meta{
 	EEG: {
 		ID:               EEG,
@@ -75,8 +190,11 @@ var metas = map[StreamID]Meta{
 	},
 }
 
-// MetaFor returns the metadata for a stream. It panics on an unknown ID, which
-// can only happen if a caller invents one: the set is closed.
+// MetaFor returns the classic-headband metadata for a stream. It panics on an
+// unknown ID, which can only happen if a caller invents one.
+//
+// Prefer Set.MetaFor where a device is in play: this describes a classic
+// Muse 2 / Muse S and is wrong for an Athena, whose EEG is 4 channels wide.
 func MetaFor(id StreamID) Meta {
 	m, ok := metas[id]
 	if !ok {
@@ -85,7 +203,8 @@ func MetaFor(id StreamID) Meta {
 	return m
 }
 
-// All returns every stream ID in wire order.
+// All returns every stream ID in wire order. Like MetaFor, this is the classic
+// layout; use Set.All for the streams a particular device actually has.
 func All() []StreamID { return []StreamID{EEG, PPG, ACC, Gyro} }
 
 // Chunk is one decoded BLE notification: a short block of samples for every

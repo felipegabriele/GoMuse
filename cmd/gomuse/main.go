@@ -106,16 +106,22 @@ func (c *connFlags) streams() map[sample.StreamID]bool {
 func (c *connFlags) any() bool { return c.eeg || c.ppg || c.acc || c.gyro }
 
 // source starts either a real headband or the synthetic generator, and returns
-// a function that runs it until the context is cancelled.
-func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Context) error, stop func(), err error) {
+// a function that runs it until the context is cancelled, along with the stream
+// set the source produces.
+//
+// The stream set comes from the source rather than from a constant because it
+// is a property of the hardware: a Muse S Athena has 4 EEG channels and no PPG,
+// a classic headband 5 and 3. The viewer and the recorder are both built from
+// whatever comes back here.
+func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Context) error, stop func(), streams *sample.Set, err error) {
 	if !c.any() {
-		return nil, nil, errors.New("all streams disabled; nothing to do")
+		return nil, nil, nil, errors.New("all streams disabled; nothing to do")
 	}
 
 	if c.demo {
 		fmt.Fprintln(os.Stderr, "running in demo mode with synthetic signals — no headband is being used")
 		src := synth.New(h, c.streams())
-		return src.Run, func() {}, nil
+		return src.Run, func() {}, sample.Classic(), nil
 	}
 
 	cfg := muse.Config{
@@ -125,6 +131,7 @@ func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Co
 		DisableLight: c.disableLight,
 		Streams:      c.streams(),
 		ScanTimeout:  c.scanTimeout,
+		Warn:         func(msg string) { fmt.Fprintln(os.Stderr, "warning: "+msg) },
 	}
 
 	if c.address == "" {
@@ -132,10 +139,10 @@ func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Co
 	}
 	client, err := muse.Connect(ctx, cfg, h.Publish)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	fmt.Fprintln(os.Stderr, "connected; streaming")
-	return client.Run, func() { _ = client.Close() }, nil
+	return client.Run, func() { _ = client.Close() }, client.Streams(), nil
 }
 
 func runList(ctx context.Context, args []string) error {
@@ -172,7 +179,7 @@ func runStream(ctx context.Context, args []string) error {
 	h := hub.New()
 	defer h.Close()
 
-	run, stopSource, err := cf.source(ctx, h)
+	run, stopSource, streams, err := cf.source(ctx, h)
 	if err != nil {
 		return err
 	}
@@ -185,14 +192,14 @@ func runStream(ctx context.Context, args []string) error {
 
 	var rec *record.Recorder
 	if *recordDir != "" {
-		rec, err = record.New(record.Config{Dir: *recordDir, Streams: cf.streams()})
+		rec, err = record.New(record.Config{Dir: *recordDir, Streams: cf.streams(), Meta: streams})
 		if err != nil {
 			return err
 		}
 		go func() { errs <- rec.Run(ctx, h) }()
 	}
 
-	srv := server.New(server.Config{Addr: fmt.Sprintf(":%d", *port), Hub: h})
+	srv := server.New(server.Config{Addr: fmt.Sprintf(":%d", *port), Hub: h, Streams: streams})
 	go func() { errs <- srv.ListenAndServe(ctx) }()
 
 	fmt.Fprintf(os.Stderr, "viewer at http://localhost:%d — Ctrl-C to stop\n", *port)
@@ -204,7 +211,7 @@ func runStream(ctx context.Context, args []string) error {
 	err = <-errs
 	cancel()
 	if rec != nil {
-		reportRecording(rec)
+		reportRecording(rec, streams)
 	}
 	if errors.Is(err, context.Canceled) {
 		return nil
@@ -225,7 +232,7 @@ func runRecord(ctx context.Context, args []string) error {
 	h := hub.New()
 	defer h.Close()
 
-	run, stopSource, err := cf.source(ctx, h)
+	run, stopSource, streams, err := cf.source(ctx, h)
 	if err != nil {
 		return err
 	}
@@ -238,7 +245,7 @@ func runRecord(ctx context.Context, args []string) error {
 		defer cancel()
 	}
 
-	rec, err := record.New(record.Config{Dir: *dir, Streams: cf.streams()})
+	rec, err := record.New(record.Config{Dir: *dir, Streams: cf.streams(), Meta: streams})
 	if err != nil {
 		return err
 	}
@@ -250,7 +257,7 @@ func runRecord(ctx context.Context, args []string) error {
 	recErr := rec.Run(ctx, h)
 	cancel()
 
-	reportRecording(rec)
+	reportRecording(rec, streams)
 
 	if recErr != nil && !errors.Is(recErr, context.Canceled) {
 		return recErr
@@ -266,7 +273,7 @@ func runRecord(ctx context.Context, args []string) error {
 }
 
 // reportRecording prints what was written, and warns loudly if rows were lost.
-func reportRecording(rec *record.Recorder) {
+func reportRecording(rec *record.Recorder, streams *sample.Set) {
 	files := rec.Files()
 	if len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "no data was recorded")
@@ -277,7 +284,7 @@ func reportRecording(rec *record.Recorder) {
 	for _, f := range files {
 		var n int
 		for id, count := range rows {
-			if strings.Contains(f, sample.MetaFor(id).Name+"_") {
+			if strings.Contains(f, streams.MetaFor(id).Name+"_") {
 				n = count
 				break
 			}

@@ -14,6 +14,7 @@ package record
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,6 +47,10 @@ type Config struct {
 	// Streams selects which streams to record. A nil or empty map records
 	// every stream.
 	Streams map[sample.StreamID]bool
+	// Meta describes the connected headband's streams, which decides the CSV
+	// header and the channel count each chunk is checked against. Nil means
+	// the classic layout.
+	Meta *sample.Set
 	// Now supplies the timestamp shared by every filename in the run. It is
 	// injectable so tests get deterministic names; nil means time.Now.
 	Now func() time.Time
@@ -66,6 +71,7 @@ type Recorder struct {
 	dir     string
 	stamp   string
 	streams map[sample.StreamID]bool
+	meta    *sample.Set
 
 	// subscribed is closed once Run has registered with the hub, so tests can
 	// publish without racing the subscription.
@@ -99,16 +105,21 @@ func New(cfg Config) (*Recorder, error) {
 		now = time.Now
 	}
 
+	meta := cfg.Meta
+	if meta == nil {
+		meta = sample.Classic()
+	}
+
 	streams := make(map[sample.StreamID]bool, len(cfg.Streams))
-	for _, id := range sample.All() {
+	for _, id := range meta.All() {
 		if len(cfg.Streams) == 0 || cfg.Streams[id] {
 			streams[id] = true
 		}
 	}
 
 	widest := 0
-	for _, id := range sample.All() {
-		if n := sample.MetaFor(id).NumChannels(); n > widest {
+	for _, id := range meta.All() {
+		if n := meta.MetaFor(id).NumChannels(); n > widest {
 			widest = n
 		}
 	}
@@ -117,6 +128,7 @@ func New(cfg Config) (*Recorder, error) {
 		dir:        dir,
 		stamp:      now().Format(timeLayout),
 		streams:    streams,
+		meta:       meta,
 		subscribed: make(chan struct{}),
 		buffer:     DefaultBuffer,
 		writers:    make(map[sample.StreamID]*writer),
@@ -191,7 +203,11 @@ func (r *Recorder) handle(c sample.Chunk) error {
 	if !r.streams[c.Stream] {
 		return nil
 	}
-	m := sample.MetaFor(c.Stream)
+	m, ok := r.meta.Meta(c.Stream)
+	if !ok {
+		r.countMalformed()
+		return nil
+	}
 	n := c.NumSamples()
 
 	if c.NumChannels() != m.NumChannels() {
@@ -254,8 +270,11 @@ func (r *Recorder) writerFor(m sample.Meta) (*writer, error) {
 
 	header := append([]string{"timestamp"}, m.Channels...)
 	if err := w.csv.Write(header); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("record: write header %s: %w", path, err)
+		writeErr := fmt.Errorf("record: write header %s: %w", path, err)
+		if closeErr := f.Close(); closeErr != nil {
+			return nil, errors.Join(writeErr, fmt.Errorf("record: close %s: %w", path, closeErr))
+		}
+		return nil, writeErr
 	}
 	r.writers[m.ID] = w
 	r.order = append(r.order, m.ID)
@@ -299,7 +318,7 @@ func (r *Recorder) Files() []string {
 	defer r.mu.Unlock()
 	out := make([]string, 0, len(r.order))
 	for _, id := range r.order {
-		out = append(out, filepath.Join(r.dir, fmt.Sprintf("%s_%s.csv", sample.MetaFor(id).Name, r.stamp)))
+		out = append(out, filepath.Join(r.dir, fmt.Sprintf("%s_%s.csv", r.meta.MetaFor(id).Name, r.stamp)))
 	}
 	return out
 }
