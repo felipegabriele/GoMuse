@@ -1,6 +1,6 @@
 # gomuse
 
-`gomuse` streams EEG, PPG, accelerometer, and gyroscope data from a Muse
+`gomuse` streams EEG, pulse (PPG or optics), accelerometer, and gyroscope data from a Muse
 brain-sensing headband over Bluetooth Low Energy. It includes a live browser
 viewer and can write each sensor stream directly to CSV, with no Python
 environment, Lab Streaming Layer, or external web assets required.
@@ -14,7 +14,7 @@ replacing the matplotlib viewer with a self-contained web application.
 
 ## Features
 
-- Streams EEG, PPG, accelerometer, and gyroscope data over BLE
+- Streams EEG, pulse (PPG or optics), accelerometer, and gyroscope data over BLE
 - Supports classic Muse 2 and Muse S devices, plus Muse S Athena (Gen 3)
 - Serves a responsive live viewer from a single compiled binary
 - Provides an optional 1–40 Hz EEG display filter
@@ -93,10 +93,15 @@ MAC address and is not portable to another computer.
 
 ### Supported data
 
-| Device family | EEG | PPG | Accelerometer | Gyroscope |
+| Device family | EEG | Pulse | Accelerometer | Gyroscope |
 | --- | --- | --- | --- | --- |
-| Muse 2 / classic Muse S | 5 channels at 256 Hz | 3 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
-| Muse S Athena (Gen 3) | 4 channels at 256 Hz | Not published | 3 axes at 52 Hz | 3 axes at 52 Hz |
+| Muse 2 / classic Muse S | 5 channels at 256 Hz | PPG, 3 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
+| Muse S Athena (Gen 3) | 4 channels at 256 Hz | Optics, 16 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
+
+The two pulse streams are alternatives rather than additions: the Athena has no
+PPG characteristic, and optics is its equivalent. How many of the 16 optics
+channels carry signal depends on the preset — the headband sends 4, 8 or 16 of
+them into the same canonical channel space, and the rest read zero.
 
 Device generation is detected automatically from its BLE characteristics. If
 a device does not expose a requested stream, `gomuse` reports what is missing
@@ -160,7 +165,8 @@ Common `stream` and `record` options:
 | `-disable-light` | off | Turn off the Muse S indicator light |
 | `-demo` | off | Generate synthetic signals instead of using BLE |
 | `-eeg=false` | enabled | Disable EEG |
-| `-ppg=false` | enabled | Disable PPG |
+| `-ppg=false` | enabled | Disable PPG (classic headbands) |
+| `-optics=false` | enabled | Disable optics (Muse S Athena) |
 | `-acc=false` | enabled | Disable accelerometer data |
 | `-gyro=false` | enabled | Disable gyroscope data |
 

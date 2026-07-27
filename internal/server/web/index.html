@@ -65,16 +65,24 @@
     <div class="stage-head">
       <h2 id="eegHeading">EEG</h2>
       <p class="stage-note">
-        Five electrodes at <span class="mono" id="eegRate">256</span> Hz.
+        Four electrodes at <span class="mono" id="eegRate">256</span> Hz.
         σ is the standard deviation over the visible window.
       </p>
     </div>
     <div class="tape" id="eegChannels" aria-live="off"></div>
   </section>
 
-  <details class="stage collapsible" id="stage-ppg">
+  <!-- PPG and optics are the classic and Athena pulse sensors respectively.
+       No headband has both, so app.js hides whichever did not appear in the
+       server's hello message. -->
+  <details class="stage collapsible" id="stage-ppg" hidden>
     <summary><h2>PPG</h2><span class="stage-note">Pulse, raw counts</span></summary>
     <div class="panel" id="panel-ppg"></div>
+  </details>
+
+  <details class="stage collapsible" id="stage-optics" hidden>
+    <summary><h2>Optics</h2><span class="stage-note">Pulse, 16 channels, raw counts</span></summary>
+    <div class="panel" id="panel-optics"></div>
   </details>
 
   <details class="stage collapsible" id="stage-acc">

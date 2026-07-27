@@ -377,3 +377,147 @@ func TestNextArrivalIsMonotonicAcrossVaryingPacketSizes(t *testing.T) {
 		t.Errorf("NextArrival(0) = %v, want nil", got)
 	}
 }
+
+// athenaOpticsPayloadHex is a synthetic 40-byte payload (byte i = i*37+11 mod
+// 256). Unlike the packet fixtures above it was not captured from hardware,
+// because a payload only has to exercise the bit unpacking — but the expected
+// values still come from running muse-lsl's decode_optics over these exact
+// bytes, so the golden values are the reference's, not gomuse's own output.
+const athenaOpticsPayloadHex = "0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c" +
+	"6186abd0f51a3f6489ae"
+
+func TestDecodeAthenaOpticsMatchesReference(t *testing.T) {
+	full := mustHex(t, athenaOpticsPayloadHex)
+
+	cases := []struct {
+		tag   byte
+		nchan int
+		nsamp int
+		bytes int
+		// want is indexed [canonicalChannel][sample]; channels the tag does
+		// not carry are checked to be zero via the zero rows here.
+		want map[int][]float64
+	}{
+		{
+			// 0x34 carries four channels into canonical slots 4-7.
+			tag: 0x34, nchan: 4, nsamp: 3, bytes: 30,
+			want: map[int][]float64{
+				4: {339979, 500349, 595183},
+				5: {653221, 73420, 538083},
+				6: {977348, 23350, 183720},
+				7: {361264, 830040, 246143},
+			},
+		},
+		{
+			// 0x35 carries eight channels into slots 0-7.
+			tag: 0x35, nchan: 8, nsamp: 2, bytes: 40,
+			want: map[int][]float64{
+				0: {339979, 595183},
+				1: {653221, 538083},
+				2: {977348, 183720},
+				3: {361264, 246143},
+				4: {500349, 755297},
+				5: {73420, 1006858},
+				6: {23350, 278298},
+				7: {830040, 714902},
+			},
+		},
+		{
+			// 0x36 fills all sixteen.
+			tag: 0x36, nchan: 16, nsamp: 1, bytes: 40,
+			want: map[int][]float64{
+				0: {339979}, 1: {653221}, 2: {977348}, 3: {361264},
+				4: {500349}, 5: {73420}, 6: {23350}, 7: {830040},
+				8: {595183}, 9: {538083}, 10: {183720}, 11: {246143},
+				12: {755297}, 13: {1006858}, 14: {278298}, 15: {714902},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		got := decodeAthenaOptics(full[:tc.bytes], tc.tag, tc.nchan, tc.nsamp)
+		if len(got) != AthenaOpticsChannels {
+			t.Fatalf("tag %#x: got %d channels, want %d", tc.tag, len(got), AthenaOpticsChannels)
+		}
+		for ch := range got {
+			want, carried := tc.want[ch]
+			if !carried {
+				// A channel this tag does not populate must stay at zero
+				// rather than pick up a neighbour's bits.
+				want = make([]float64, tc.nsamp)
+			}
+			if len(got[ch]) != tc.nsamp {
+				t.Fatalf("tag %#x ch%d: got %d samples, want %d", tc.tag, ch, len(got[ch]), tc.nsamp)
+			}
+			for i := range want {
+				if got[ch][i] != want[i] {
+					t.Errorf("tag %#x optics[%d][%d] = %.0f, want %.0f",
+						tc.tag, ch, i, got[ch][i], want[i])
+				}
+			}
+		}
+	}
+}
+
+// athenaOpticsPacket frames the synthetic payload as a whole notification.
+func athenaOpticsPacket(t *testing.T, tag byte, payloadLen int) []byte {
+	t.Helper()
+	packet := make([]byte, athenaHeaderSize+payloadLen)
+	packet[0] = byte(len(packet))
+	packet[9] = tag
+	copy(packet[athenaHeaderSize:], mustHex(t, athenaOpticsPayloadHex)[:payloadLen])
+	return packet
+}
+
+func TestAthenaStreamerPublishesOptics(t *testing.T) {
+	var got []sample.Chunk
+	s := newAthenaStreamer(
+		Config{Streams: map[sample.StreamID]bool{sample.Optics: true}},
+		func(c sample.Chunk) { got = append(got, c) },
+		func() {},
+		fakeClock(1000, 1.0/64),
+	)
+
+	s.handle(athenaOpticsPacket(t, 0x35, 40))
+
+	if len(got) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(got))
+	}
+	c := got[0]
+	if c.Stream != sample.Optics {
+		t.Errorf("stream = %d, want Optics (%d)", c.Stream, sample.Optics)
+	}
+	// The chunk must be as wide as the Set the viewer was told about, not as
+	// wide as the tag: a preset change must not resize the stream.
+	wantChan := len(sample.Athena().MetaFor(sample.Optics).Channels)
+	if c.NumChannels() != wantChan {
+		t.Errorf("channels = %d, want %d", c.NumChannels(), wantChan)
+	}
+	if c.NumSamples() != 2 {
+		t.Errorf("samples = %d, want 2", c.NumSamples())
+	}
+	if c.Data[0][0] != 339979 {
+		t.Errorf("optics[0][0] = %.0f, want 339979", c.Data[0][0])
+	}
+	for i, ts := range c.Timestamps {
+		if ts <= 0 {
+			t.Errorf("timestamp %d = %f, want a positive instant", i, ts)
+		}
+	}
+}
+
+func TestAthenaStreamerSkipsOpticsWhenDisabled(t *testing.T) {
+	var got []sample.Chunk
+	s := newAthenaStreamer(
+		Config{Streams: map[sample.StreamID]bool{sample.EEG: true}},
+		func(c sample.Chunk) { got = append(got, c) },
+		func() {},
+		fakeClock(1000, 1.0/64),
+	)
+
+	s.handle(athenaOpticsPacket(t, 0x35, 40))
+
+	if len(got) != 0 {
+		t.Errorf("got %d chunks with optics disabled, want 0", len(got))
+	}
+}

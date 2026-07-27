@@ -332,8 +332,8 @@ func (c *client) readLoop(ctx context.Context, cancel context.CancelFunc, conn *
 // chunk is being delivered to every other subscriber.
 //
 // Only EEG is filtered. A 1-40 Hz bandpass designed for 256 Hz would be
-// meaningless on 52 Hz accelerometer data, and the PPG pedestal is signal, not
-// drift.
+// meaningless on 52 Hz accelerometer data, and the pedestal in the pulse
+// streams (classic PPG, Athena optics) is signal, not drift.
 func (c *client) prepare(chunk sample.Chunk) sample.Chunk {
 	want := c.want.Load()
 	if want != c.on {

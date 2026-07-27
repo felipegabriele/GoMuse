@@ -171,7 +171,18 @@
     };
   }
 
-  function seriesColor(c, i) { return c.series[i % c.series.length]; }
+  // n is the stream's channel count. A wide stream outruns the three-colour
+  // palette — Athena optics is 16 channels, which would give five of them the
+  // same stroke — so those get evenly spaced hues instead, keeping every trace
+  // in the panel distinguishable. Narrow streams keep the designed palette.
+  function seriesColor(c, i, n) {
+    if (!n || n <= c.series.length) return c.series[i % c.series.length];
+    return 'hsl(' + Math.round((360 / n) * i) + ', 70%, 58%)';
+  }
+
+  // WIDE_STREAM is the channel count above which a panel switches to generated
+  // hues and hides its silent channels. Only optics reaches it today.
+  var WIDE_STREAM = 8;
 
   // --------------------------------------------------------------- charts
 
@@ -310,11 +321,12 @@
     stats.className = 'panel-stats';
     panel.appendChild(stats);
 
+    var nchan = stream.meta.channels.length;
     var series = [{}];
     stream.meta.channels.forEach(function (name, i) {
       series.push({
         label: name,
-        stroke: seriesColor(c, i),
+        stroke: seriesColor(c, i, nchan),
         width: 1.25,
         points: { show: false }
       });
@@ -339,18 +351,41 @@
       var span = document.createElement('span');
       span.className = 'stat';
       span.innerHTML = '<i></i><b></b><em class="mono">σ —</em>';
-      span.querySelector('i').style.background = seriesColor(c, i);
+      span.querySelector('i').style.background = seriesColor(c, i, nchan);
       span.querySelector('b').textContent = name;
       stats.appendChild(span);
-      return { sigma: span.querySelector('em'), node: plot };
+      return { sigma: span.querySelector('em'), node: plot, chip: span };
     });
+    // Tracks which channels are currently hidden as silent, so the series are
+    // only toggled when that changes rather than on every stats pass.
+    stream.silent = stream.meta.channels.map(function () { return false; });
   }
 
-  var PANELS = { ppg: 'panel-ppg', acc: 'panel-acc', gyro: 'panel-gyro' };
+  var PANELS = {
+    ppg: 'panel-ppg',
+    optics: 'panel-optics',
+    acc: 'panel-acc',
+    gyro: 'panel-gyro'
+  };
+
+  // Stages a headband may not have. PPG and optics are alternatives — a classic
+  // Muse sends the first, an Athena the second — so the one that did not appear
+  // in hello is hidden rather than left as an empty panel that looks broken.
+  var OPTIONAL_STAGES = { ppg: 'stage-ppg', optics: 'stage-optics' };
+
+  function showStages(hello) {
+    var present = {};
+    hello.streams.forEach(function (m) { present[m.name] = true; });
+    Object.keys(OPTIONAL_STAGES).forEach(function (name) {
+      var stage = document.getElementById(OPTIONAL_STAGES[name]);
+      if (stage) stage.hidden = !present[name];
+    });
+  }
 
   function build(hello) {
     streams = [];
     streamsById = {};
+    showStages(hello);
 
     hello.streams.forEach(function (meta) {
       var target = Math.ceil(state.window * meta.rate);
@@ -469,6 +504,21 @@
       var out = s.readouts[c];
       if (!out) continue;
       out.sigma.textContent = 'σ ' + formatValue(sd, displayUnit(s.meta.unit));
+
+      // On a wide stream, a channel the device is not filling reads as exactly
+      // zero rather than as noise — Athena optics decodes all 16 canonical
+      // channels but a given preset only carries 4 or 8 of them. Hide those,
+      // so the panel shows the live channels instead of a flat line at zero
+      // dragging the shared y-scale down. Restricted to wide streams because
+      // on a 3-axis IMU an exact zero is more likely to be real.
+      if (tr.nchan > WIDE_STREAM && s.silent) {
+        var silent = sd === 0 && s.center[c] === 0;
+        if (silent !== s.silent[c]) {
+          s.silent[c] = silent;
+          if (s.charts[0]) s.charts[0].setSeries(c + 1, { show: !silent });
+          if (out.chip) out.chip.dataset.silent = silent ? 'true' : 'false';
+        }
+      }
 
       if (out.quality) {
         var level = sd < 20 ? 'good' : (sd < 60 ? 'warning' : 'critical');

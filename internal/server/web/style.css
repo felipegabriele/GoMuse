@@ -214,6 +214,13 @@ kbd {
 main { padding: 8px 20px 32px; }
 
 .stage { margin: 18px 0; }
+/* Explicit, so a stage this headband lacks stays hidden even though `details`
+   carries its own display value from the UA stylesheet. */
+.stage[hidden] { display: none; }
+
+/* A channel the device is not filling: dimmed rather than removed, so the
+   panel still shows that the channel exists and is simply not carrying. */
+.stat[data-silent="true"] { opacity: 0.35; }
 
 .stage h2 {
   margin: 0;

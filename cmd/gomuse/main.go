@@ -77,7 +77,7 @@ type connFlags struct {
 	scanTimeout  time.Duration
 	demo         bool
 
-	eeg, ppg, acc, gyro bool
+	eeg, ppg, acc, gyro, optics bool
 }
 
 func (c *connFlags) register(fs *flag.FlagSet) {
@@ -89,21 +89,26 @@ func (c *connFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.demo, "demo", false, "generate synthetic signals instead of connecting to a headband")
 
 	fs.BoolVar(&c.eeg, "eeg", true, "stream EEG")
-	fs.BoolVar(&c.ppg, "ppg", true, "stream PPG")
+	fs.BoolVar(&c.ppg, "ppg", true, "stream PPG (classic headbands; the Athena's equivalent is -optics)")
 	fs.BoolVar(&c.acc, "acc", true, "stream accelerometer")
 	fs.BoolVar(&c.gyro, "gyro", true, "stream gyroscope")
+	fs.BoolVar(&c.optics, "optics", true, "stream 16-channel optics (Muse S Athena only)")
 }
 
 func (c *connFlags) streams() map[sample.StreamID]bool {
+	// Every stream any supported headband produces must appear here, including
+	// those a given device lacks: muse.Config.wants reads this map directly, so
+	// an omitted key reads as "disabled" rather than "not applicable".
 	return map[sample.StreamID]bool{
-		sample.EEG:  c.eeg,
-		sample.PPG:  c.ppg,
-		sample.ACC:  c.acc,
-		sample.Gyro: c.gyro,
+		sample.EEG:    c.eeg,
+		sample.PPG:    c.ppg,
+		sample.ACC:    c.acc,
+		sample.Gyro:   c.gyro,
+		sample.Optics: c.optics,
 	}
 }
 
-func (c *connFlags) any() bool { return c.eeg || c.ppg || c.acc || c.gyro }
+func (c *connFlags) any() bool { return c.eeg || c.ppg || c.acc || c.gyro || c.optics }
 
 // source starts either a real headband or the synthetic generator, and returns
 // a function that runs it until the context is cancelled, along with the stream

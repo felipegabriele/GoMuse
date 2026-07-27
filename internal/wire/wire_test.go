@@ -204,3 +204,40 @@ func TestControlJSON(t *testing.T) {
 		t.Fatalf("empty Control marshals to %s, want {}", b)
 	}
 }
+
+func TestCodecRoundTripsAthenaOptics(t *testing.T) {
+	// Optics is the widest stream gomuse carries. The header's nchan is a
+	// single byte, so 16 channels is worth pinning explicitly.
+	set := sample.Athena()
+	nchan := set.MetaFor(sample.Optics).NumChannels()
+
+	in := sample.Chunk{
+		Stream:     sample.Optics,
+		Timestamps: []float64{1000, 1000 + 1.0/64},
+		Data:       make([][]float64, nchan),
+	}
+	for ch := range in.Data {
+		// Raw optics counts run to ~1e6, far outside the range EEG exercises.
+		in.Data[ch] = []float64{float64(ch) * 65536, 1006858}
+	}
+
+	codec := NewCodec(set)
+	got, err := codec.DecodeChunk(codec.EncodeChunk(in))
+	if err != nil {
+		t.Fatalf("DecodeChunk: %v", err)
+	}
+	if got.Stream != sample.Optics {
+		t.Errorf("stream = %d, want Optics", got.Stream)
+	}
+	if got.NumChannels() != nchan {
+		t.Fatalf("channels = %d, want %d", got.NumChannels(), nchan)
+	}
+	for ch := range in.Data {
+		for i := range in.Data[ch] {
+			// f32 payload, so compare at float32 precision rather than exactly.
+			if float32(got.Data[ch][i]) != float32(in.Data[ch][i]) {
+				t.Errorf("optics[%d][%d] = %v, want %v", ch, i, got.Data[ch][i], in.Data[ch][i])
+			}
+		}
+	}
+}
