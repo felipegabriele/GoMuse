@@ -139,11 +139,20 @@ One new JSON text message, throttled to about 4 Hz:
 ```
 
 `beats` carries beat timestamps from the last 60 s in Unix seconds, on the same
-time base as chunk timestamps, so the browser can position markers on the
-existing x-axis. Sixty seconds is `MAX_WINDOW` in `app.js`, the viewer's longest
-selectable window; the browser discards any beats outside what it is currently
-showing. At a typical rate that is about 70 timestamps per message, four times a
-second — negligible next to the sample frames already on the socket.
+time base as the `t0` field of the binary frame header. Sixty seconds is
+`MAX_WINDOW` in `app.js`, the viewer's longest selectable window; the browser
+discards any beats outside what it is currently showing. At a typical rate that
+is about 70 timestamps per message, four times a second — negligible next to the
+sample frames already on the socket.
+
+**The browser must shift these by `state.epoch` before plotting them.** The
+viewer's stored x-values are *not* absolute Unix seconds: `app.js` captures the
+first frame's `t0` as `state.epoch` and pushes `frame.t0 - state.epoch`, so the
+trace's x-axis is session-relative. An earlier draft of this spec asserted the
+opposite, on the strength of reading `tracePush`'s body without checking what
+its caller passes for `t0`. Plotting unshifted Unix timestamps against a
+session-relative axis puts every marker about 1.7e9 seconds off-screen, so the
+panel renders with no beat markers at all and no error.
 
 `bpm` and `rmssd` are `null` in any state other than `locked`, and `rmssd` is
 `null` until 30 s of intervals have accumulated. `channel` is `null` in the
