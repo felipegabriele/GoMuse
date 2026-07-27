@@ -29,6 +29,7 @@ import (
 
 	"gomuse/internal/dsp"
 	"gomuse/internal/hub"
+	"gomuse/internal/pulse"
 	"gomuse/internal/sample"
 	"gomuse/internal/wire"
 )
@@ -57,6 +58,11 @@ const (
 	filterTaps = 32
 	filterLow  = 1.0
 	filterHigh = 40.0
+
+	// pulseIntervalSec throttles the pulse message. Four a second is far more
+	// often than a heart beats; it exists so the readout feels live rather
+	// than to carry new beats.
+	pulseIntervalSec = 0.25
 )
 
 // Config configures a Server.
@@ -102,6 +108,23 @@ type StreamInfo struct {
 type Hello struct {
 	Type    string       `json:"type"`
 	Streams []StreamInfo `json:"streams"`
+}
+
+// PulseMessage is the derived heart-rate message, sent as a WebSocket text
+// frame alongside the binary sample frames.
+//
+// The numeric fields are pointers so that "not known yet" marshals as null
+// rather than as zero: a bpm of 0 and an unknown bpm must not be confusable in
+// the browser.
+type PulseMessage struct {
+	Type      string    `json:"type"`
+	Channel   *string   `json:"channel"`
+	State     string    `json:"state"`
+	BPM       *float64  `json:"bpm"`
+	RMSSD     *float64  `json:"rmssd"`
+	IBIMs     *float64  `json:"ibiMs"`
+	Beats     []float64 `json:"beats"`
+	BeatCount int       `json:"beatCount"`
 }
 
 // Health is the /healthz body.
@@ -264,6 +287,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
+
+			if msg, due := cl.pulseUpdate(c); due {
+				b, merr := json.Marshal(msg)
+				if merr != nil {
+					continue // A message we cannot encode is not worth dropping the viewer for.
+				}
+				wctx, wcancel := context.WithTimeout(ctx, writeTimeout)
+				err := conn.Write(wctx, websocket.MessageText, b)
+				wcancel()
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
 }
@@ -283,6 +319,13 @@ type client struct {
 	on   bool
 	bank *dsp.Bank
 	dc   *dsp.DCBlockerBank
+
+	// Pulse tracking, writer-goroutine-owned like the DSP banks above.
+	// tracker is nil when the device has no pulse stream at all.
+	tracker    *pulse.Tracker
+	pulseID    sample.StreamID
+	pulseNames []string
+	nextPulse  float64
 }
 
 // newClient sizes the per-viewer DSP to the connected headband's EEG stream:
@@ -296,10 +339,66 @@ func newClient(streams *sample.Set) *client {
 		m = sample.Meta{Rate: 256}
 	}
 	nch, rate := m.NumChannels(), m.Rate
-	return &client{
+	c := &client{
 		bank: dsp.NewBank(dsp.FirwinBandpass(filterTaps, filterLow, filterHigh, rate), nch),
 		dc:   dsp.NewDCBlockerBank(0.5, rate, nch),
 	}
+
+	// Optics and PPG are alternatives — an Athena has the first, a classic
+	// headband the second, and no device produces both — so the first one
+	// present is this device's pulse stream.
+	for _, id := range []sample.StreamID{sample.Optics, sample.PPG} {
+		pm, ok := streams.Meta(id)
+		if !ok {
+			continue
+		}
+		c.tracker = pulse.NewTracker(pm.Rate, pm.NumChannels())
+		c.pulseID = id
+		c.pulseNames = pm.Channels
+		break
+	}
+	return c
+}
+
+// pulseUpdate feeds a chunk to the pulse tracker and reports whether a message
+// is due. It returns false for chunks of any other stream, for devices with no
+// pulse stream, and between throttle intervals.
+func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
+	if c.tracker == nil || chunk.Stream != c.pulseID || chunk.NumSamples() == 0 {
+		return PulseMessage{}, false
+	}
+	c.tracker.Process(chunk.Data, chunk.Timestamps)
+
+	now := chunk.Timestamps[chunk.NumSamples()-1]
+	if now < c.nextPulse {
+		return PulseMessage{}, false
+	}
+	c.nextPulse = now + pulseIntervalSec
+
+	snap := c.tracker.Snapshot()
+	msg := PulseMessage{
+		Type:      "pulse",
+		State:     string(snap.State),
+		Beats:     snap.Beats,
+		BeatCount: snap.BeatCount,
+	}
+	if snap.Channel >= 0 && snap.Channel < len(c.pulseNames) {
+		name := c.pulseNames[snap.Channel]
+		msg.Channel = &name
+	}
+	if snap.HasBPM {
+		v := snap.BPM
+		msg.BPM = &v
+	}
+	if snap.HasRMSSD {
+		v := snap.RMSSD
+		msg.RMSSD = &v
+	}
+	if snap.HasIBI {
+		v := snap.IBIMs
+		msg.IBIMs = &v
+	}
+	return msg, true
 }
 
 // readLoop handles control messages until the connection fails, then cancels

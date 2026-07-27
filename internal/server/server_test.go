@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 
 	"gomuse/internal/hub"
+	"gomuse/internal/pulse"
 	"gomuse/internal/sample"
 	"gomuse/internal/wire"
 )
@@ -617,5 +618,129 @@ func TestAthenaEEGChunkSurvivesTheRoundTrip(t *testing.T) {
 	}
 	if got.Stream != sample.EEG {
 		t.Errorf("stream = %d, want EEG", got.Stream)
+	}
+}
+
+func TestPulseMessageShapeWhenLocked(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+
+	m := set.MetaFor(sample.Optics)
+	rate := m.Rate
+	nch := m.NumChannels()
+
+	// 60 s of a clean 72 bpm pulse on one channel, flat elsewhere.
+	var last PulseMessage
+	var got bool
+	const chunkSamples = 1
+	total := int(rate * 60)
+	for i := 0; i < total; i += chunkSamples {
+		data := make([][]float64, nch)
+		ts := make([]float64, chunkSamples)
+		for s := 0; s < chunkSamples; s++ {
+			e := float64(i+s) / rate
+			ts[s] = 1000 + e
+		}
+		for ch := 0; ch < nch; ch++ {
+			data[ch] = make([]float64, chunkSamples)
+			for s := 0; s < chunkSamples; s++ {
+				e := float64(i+s) / rate
+				phase := math.Mod(e*1.2, 1)
+				d := (phase - 0.2) / 0.12
+				bump := math.Exp(-(d * d))
+				mod := 0.0002
+				if ch == 12 {
+					mod = 0.04
+				}
+				data[ch][s] = 100000 * (1 + mod*bump)
+			}
+		}
+		if msg, ok := c.pulseUpdate(sample.Chunk{
+			Stream: sample.Optics, Timestamps: ts, Data: data,
+		}); ok {
+			last, got = msg, true
+		}
+	}
+
+	if !got {
+		t.Fatal("no pulse message produced over 60 s")
+	}
+	if last.Type != "pulse" {
+		t.Errorf("Type = %q, want \"pulse\"", last.Type)
+	}
+	if last.State != string(pulse.StateLocked) {
+		t.Fatalf("State = %q, want %q", last.State, pulse.StateLocked)
+	}
+	if last.Channel == nil || *last.Channel != "OPT12" {
+		t.Errorf("Channel = %v, want OPT12", last.Channel)
+	}
+	if last.BPM == nil || math.Abs(*last.BPM-72) > 3 {
+		t.Errorf("BPM = %v, want 72 +/- 3", last.BPM)
+	}
+
+	// The message must round-trip as JSON with nulls, not zeros, for absent
+	// numbers — the browser distinguishes them.
+	b, err := json.Marshal(last)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"type":"pulse"`) {
+		t.Errorf("marshalled message missing type: %s", b)
+	}
+}
+
+func TestPulseUpdateIgnoresNonPulseStreams(t *testing.T) {
+	c := newClient(sample.Athena())
+	eeg := sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{1000},
+		Data:       [][]float64{{1}, {2}, {3}, {4}},
+	}
+	if _, ok := c.pulseUpdate(eeg); ok {
+		t.Error("pulseUpdate produced a message for an EEG chunk")
+	}
+}
+
+func TestPulseUpdateAbsentWithoutPulseStream(t *testing.T) {
+	// A device with EEG only: no pulse stream, so no tracker and no messages.
+	set := sample.NewSet(sample.MetaFor(sample.EEG))
+	c := newClient(set)
+	chunk := sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{1000},
+		Data:       [][]float64{{1}, {2}, {3}, {4}, {5}},
+	}
+	if _, ok := c.pulseUpdate(chunk); ok {
+		t.Error("pulseUpdate produced a message for a device with no pulse stream")
+	}
+}
+
+func TestPulseMessageNullsBeforeLock(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+	m := set.MetaFor(sample.Optics)
+
+	// One second of flat signal: not enough for anything.
+	nch := m.NumChannels()
+	var last PulseMessage
+	var got bool
+	for i := 0; i < int(m.Rate); i++ {
+		data := make([][]float64, nch)
+		for ch := range data {
+			data[ch] = []float64{100000}
+		}
+		if msg, ok := c.pulseUpdate(sample.Chunk{
+			Stream:     sample.Optics,
+			Timestamps: []float64{1000 + float64(i)/m.Rate},
+			Data:       data,
+		}); ok {
+			last, got = msg, true
+		}
+	}
+	if !got {
+		t.Fatal("no pulse message produced")
+	}
+	if last.BPM != nil || last.RMSSD != nil {
+		t.Errorf("BPM=%v RMSSD=%v, want both nil before lock", last.BPM, last.RMSSD)
 	}
 }
