@@ -95,35 +95,33 @@ func TestTrackerTransitionsFlatToLocked(t *testing.T) {
 // units that are each already correct on their own.
 func TestTrackerBreaksIntervalChainAcrossGap(t *testing.T) {
 	const rate = 64.0
-	first, ts := pulseTrain(int(rate*30), rate, 72, 100000, 0.04)
+	first, ts := pulseTrain(int(rate*20), rate, 72, 100000, 0.04)
 
 	tr := NewTracker(rate, 1)
 	feed(tr, [][]float64{first}, ts, 16)
 	before := tr.hrv.IntervalCount()
 	if before < 5 {
-		t.Fatalf("only %d intervals after 30 s, want >=5", before)
+		t.Fatalf("only %d intervals after 20 s, want >=5", before)
 	}
 
-	// A second run starting 5 s later: samples were lost in between.
-	second, sts := pulseTrain(int(rate*30), rate, 72, 100000, 0.04)
+	// A second run starting 1 s later: samples were lost in between. The gap is
+	// short enough that the beat closing it lands within MinIntervalMs/
+	// MaxIntervalMs of the last beat before the gap — AddBeat's own range check
+	// would accept it. Break is therefore the only thing that can suppress it,
+	// which is what this test needs to actually exercise.
+	second, sts := pulseTrain(int(rate*20), rate, 72, 100000, 0.04)
 	for i := range sts {
-		sts[i] = ts[len(ts)-1] + 5.0 + float64(i)/rate
+		sts[i] = ts[len(ts)-1] + 1.0 + float64(i)/rate
 	}
 	feed(tr, [][]float64{second}, sts, 16)
 
-	// Every interval in the second run is legitimate, but none may span the
-	// discontinuity. The beat closing the gap contributes no interval, so the
-	// total is one short of what contiguous data would have produced.
-	//
-	// Compared against the HRV's own beat count rather than Snapshot's, since
-	// Snapshot windows beats from the last raw sample timestamp while the HRV
-	// windows its beats from the last accepted beat's own timestamp — those two
-	// cutoffs differ by the detector's inherent detection lag and would make
-	// this comparison flaky by +/-1 for reasons unrelated to the gap wiring.
-	beats := len(tr.hrv.beats)
-	if got := tr.hrv.IntervalCount(); got >= beats-1 {
-		t.Errorf("IntervalCount = %d with %d beats: an interval spans the gap",
-			got, beats)
+	// Total span is under BeatHistorySec, so nothing is trimmed and
+	// Snapshot().BeatCount equals the HRV's own beat count exactly: the
+	// windowing-basis mismatch that affects longer runs does not apply here.
+	snap := tr.Snapshot()
+	if got := tr.hrv.IntervalCount(); got != snap.BeatCount-2 {
+		t.Errorf("IntervalCount = %d with %d beats, want %d: an interval spans the gap",
+			got, snap.BeatCount, snap.BeatCount-2)
 	}
 }
 
@@ -146,8 +144,42 @@ func TestTrackerResetsOnChannelSwitch(t *testing.T) {
 	for i := range ts2 {
 		ts2[i] = ts[len(ts)-1] + float64(i+1)/rate
 	}
-	feed(tr, [][]float64{strong2, weak2}, ts2, 16)
 
+	// Feed one sample at a time so the exact call that flips the selected
+	// channel can be caught, and check its aftermath directly: that call is
+	// the only place Reset and Break are supposed to run.
+	switched := false
+	for i := range ts2 {
+		before := tr.channel
+		tr.Process([][]float64{strong2[i : i+1], weak2[i : i+1]}, ts2[i:i+1])
+		if tr.channel == before {
+			continue
+		}
+		switched = true
+
+		// hrv.Break clears haveLast; a single fresh sample cannot itself
+		// complete a beat, so if Break ran this must still be false. Without
+		// it, the last beat from channel 0 would still be pending and able to
+		// pair with channel 1's first beat into a bogus cross-channel interval.
+		if tr.hrv.haveLast {
+			t.Error("hrv.haveLast = true right after the channel switch, want false (Break did not run)")
+		}
+
+		// det.Reset should leave the detector as if this were the first sample
+		// it had ever seen: compare against a brand-new detector fed the same
+		// sample. Without Reset, stale filter/peak history from channel 0 (a
+		// different pedestal, unrelated phase) would still be mixed in.
+		want := NewDetector(rate)
+		want.Process(weak2[i:i+1], ts2[i:i+1])
+		if tr.det.have != want.have || tr.det.peak != want.peak {
+			t.Errorf("detector state after switch = {have:%d peak:%g}, want {have:%d peak:%g} (Reset did not run)",
+				tr.det.have, tr.det.peak, want.have, want.peak)
+		}
+		break
+	}
+	if !switched {
+		t.Fatal("channel never switched to 1")
+	}
 	if got := tr.Snapshot().Channel; got != 1 {
 		t.Errorf("Channel = %d, want 1 after the switch", got)
 	}
