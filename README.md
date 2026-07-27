@@ -1,0 +1,263 @@
+# gomuse
+
+`gomuse` streams EEG, PPG, accelerometer, and gyroscope data from a Muse
+brain-sensing headband over Bluetooth Low Energy. It includes a live browser
+viewer and can write each sensor stream directly to CSV, with no Python
+environment, Lab Streaming Layer, or external web assets required.
+
+The project is a Go port of the device and viewer layers of
+[muse-lsl](https://github.com/alexandrebarachant/muse-lsl). It keeps
+muse-lsl's decoding, timestamp correction, and EEG bandpass behavior while
+replacing the matplotlib viewer with a self-contained web application.
+
+## Features
+
+- Streams EEG, PPG, accelerometer, and gyroscope data over BLE
+- Supports classic Muse 2 and Muse S devices, plus Muse S Athena (Gen 3)
+- Serves a responsive live viewer from a single compiled binary
+- Provides an optional 1–40 Hz EEG display filter
+- Records one timestamped CSV file per sensor stream
+- Includes a synthetic signal mode for trying the viewer without a headband
+- Embeds all browser assets and requires no internet access at runtime
+- Shuts down cleanly on `Ctrl-C` and flushes recordings before exiting
+
+## Requirements
+
+- macOS with Bluetooth enabled
+- [Go 1.24](https://go.dev/dl/) or newer
+- A modern web browser
+- A Muse headband, unless you use demo mode
+- Optional: [Task](https://taskfile.dev/installation/) for the provided
+  development commands
+
+Real-device access uses Apple's CoreBluetooth API. The terminal application
+running `gomuse` must have Bluetooth permission under **System Settings →
+Privacy & Security → Bluetooth**.
+
+## Quick start
+
+Clone and build the project:
+
+```sh
+git clone https://github.com/itsmostafa/gomuse.git
+cd gomuse
+go build -o ./bin/gomuse ./cmd/gomuse
+```
+
+Start the viewer with synthetic signals:
+
+```sh
+./bin/gomuse stream -demo
+```
+
+Then open [http://localhost:1111](http://localhost:1111). Demo mode exercises
+the same streaming, filtering, WebSocket, and rendering pipeline as a real
+headband.
+
+If Task is installed, the equivalent commands are:
+
+```sh
+task build
+task demo
+```
+
+## Using a headband
+
+Power on the headband, take it out of its case, and scan for nearby devices:
+
+```sh
+./bin/gomuse list
+```
+
+Connect to the strongest Muse found and start the viewer:
+
+```sh
+./bin/gomuse stream
+```
+
+For a predictable connection when several headbands are nearby, select one by
+name or by the CoreBluetooth UUID printed by `list`:
+
+```sh
+./bin/gomuse stream -name MuseS-4A2B
+./bin/gomuse stream -address 01234567-89AB-CDEF-0123-456789ABCDEF
+```
+
+The UUID is assigned by CoreBluetooth on the local Mac. It is not a Bluetooth
+MAC address and is not portable to another computer.
+
+### Supported data
+
+| Device family | EEG | PPG | Accelerometer | Gyroscope |
+| --- | --- | --- | --- | --- |
+| Muse 2 / classic Muse S | 5 channels at 256 Hz | 3 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
+| Muse S Athena (Gen 3) | 4 channels at 256 Hz | Not published | 3 axes at 52 Hz | 3 axes at 52 Hz |
+
+Device generation is detected automatically from its BLE characteristics. If
+a device does not expose a requested stream, `gomuse` reports what is missing
+and suggests the appropriate flag for disabling it.
+
+## Recording
+
+Record until `Ctrl-C`:
+
+```sh
+./bin/gomuse record -dir ./data
+```
+
+Record for a fixed duration:
+
+```sh
+./bin/gomuse record -dir ./data -duration 60s
+```
+
+You can also view and record in the same session:
+
+```sh
+./bin/gomuse stream -record-dir ./data
+```
+
+Recordings are written as separate files because the streams have different
+sample rates:
+
+```text
+data/
+├── eeg_2026-07-27_14-30-00.csv
+├── ppg_2026-07-27_14-30-00.csv
+├── acc_2026-07-27_14-30-00.csv
+└── gyro_2026-07-27_14-30-00.csv
+```
+
+Each file starts with a `timestamp` column followed by its channel names.
+Timestamps are Unix seconds with microsecond precision. Sensor values use
+microvolts for EEG, raw device counts for PPG, `g` for acceleration, and
+degrees per second for rotation.
+
+The viewer's EEG filter affects display data only. CSV recordings retain the
+unfiltered samples.
+
+## Command reference
+
+```text
+gomuse list [flags]
+gomuse stream [flags]
+gomuse record [flags]
+```
+
+Common `stream` and `record` options:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-address UUID` | scan | Connect using a CoreBluetooth peripheral UUID |
+| `-name NAME` | strongest device | Match an advertised device name |
+| `-scan-timeout DURATION` | `10s` | Limit discovery time |
+| `-preset PRESET` | automatic | Select a headband preset |
+| `-disable-light` | off | Turn off the Muse S indicator light |
+| `-demo` | off | Generate synthetic signals instead of using BLE |
+| `-eeg=false` | enabled | Disable EEG |
+| `-ppg=false` | enabled | Disable PPG |
+| `-acc=false` | enabled | Disable accelerometer data |
+| `-gyro=false` | enabled | Disable gyroscope data |
+
+`stream` also accepts `-port` (default `1111`) and `-record-dir`. `record`
+accepts `-dir` (default `.`) and `-duration` (default `0`, meaning until
+interrupted).
+
+Run a command with `-h` for the complete built-in help:
+
+```sh
+./bin/gomuse stream -h
+```
+
+## Viewer controls
+
+The browser viewer shows one trace per EEG electrode, with collapsible panels
+for PPG and motion data. You can change the visible time window, adjust EEG
+amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard:
+
+| Key | Action |
+| --- | --- |
+| `/` | Double the displayed EEG amplitude range |
+| `*` | Halve the displayed EEG amplitude range |
+| `+` | Lengthen the time window |
+| `-` | Shorten the time window |
+| `d` | Toggle the EEG display filter |
+
+The server also exposes `GET /healthz`, which reports its status, connected
+viewer count, and dropped display chunks as JSON.
+
+## Security and privacy
+
+The viewer has no authentication, and the server listens on the selected port
+on all network interfaces. Run it only on a trusted network or use your
+firewall to restrict access. Treat CSV files as sensitive data: EEG and motion
+recordings may contain personal information, and `gomuse` does not encrypt
+them.
+
+## Development
+
+The repository has no hardware-dependent tests. Run the standard checks with
+Go:
+
+```sh
+go test ./...
+go vet ./...
+go build ./cmd/gomuse
+```
+
+Or use the Taskfile:
+
+```sh
+task --list
+task test
+task test:race
+task vet
+task build
+```
+
+`task check` runs formatting, vetting, linting, race tests, and a build.
+It requires
+[golangci-lint](https://golangci-lint.run/docs/welcome/install/).
+For browser development, `task dev` watches the Go and web sources and restarts
+the demo viewer when they change.
+
+The runtime is organized as one producer feeding independent consumers:
+
+```text
+Muse headband ─┐
+               ├── hub ──┬── WebSocket server ── browser viewer
+demo source ───┘         └── CSV recorder
+```
+
+The hub never blocks the Bluetooth callback. Each browser and recorder has its
+own buffered subscription, so a slow viewer cannot stall acquisition or
+another consumer.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a pull request:
+
+1. Add or update hardware-free tests for behavior changes.
+2. Run `task check`, or at minimum `go test ./...`, `go vet ./...`, and a
+   local build.
+3. Keep changes to decoding, timestamping, or filtering aligned with
+   muse-lsl, and document intentional differences.
+4. Use a [Conventional Commit](https://www.conventionalcommits.org/) message,
+   such as `fix(muse): handle truncated eeg packet`.
+
+Please keep recordings and other personal biosignal data out of issues, test
+fixtures, and commits unless they have been deliberately anonymized and you
+have permission to share them.
+
+## Acknowledgments
+
+`gomuse` builds on the protocol and signal-processing work in
+[muse-lsl](https://github.com/alexandrebarachant/muse-lsl). The embedded charts
+use [uPlot](https://github.com/leeoniya/uPlot).
+
+## License
+
+This repository does not currently include a project license. Until one is
+added, copyright law reserves all rights to the project authors. A license is
+required before others can legally use, modify, or redistribute the code as
+open source.
