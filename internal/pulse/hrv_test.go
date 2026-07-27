@@ -160,3 +160,56 @@ func TestBeatsReturnsRecentOnly(t *testing.T) {
 		t.Errorf("Beats(1005)[0] = %v, want 1005", got[0])
 	}
 }
+
+// TestBeatHistoryEvictsStaleBeats pins the BeatHistorySec trim on the
+// underlying beat storage, not just the since filter Beats() applies on top.
+//
+// 90 one-second intervals carry t from 1000 to 1090 (91 beats). The trim in
+// AddBeat runs on every call against the *current* t, and the cutoff only
+// climbs as t climbs, so by the end only beats with t >= 1090-60 = 1030
+// survive: 61 of the 91 fed. Beats(0) is called with since far in the past —
+// if eviction were broken (or Beats() were merely filtering a full history),
+// it would still return all 91; the assertions below fail either way.
+func TestBeatHistoryEvictsStaleBeats(t *testing.T) {
+	h := NewHRV()
+	ms := make([]float64, 90)
+	for i := range ms {
+		ms[i] = 1000
+	}
+	end := addIntervals(h, 1000, ms)
+
+	got := h.Beats(0) // since far in the past: exercises storage, not the filter
+	for _, bt := range got {
+		if bt < end-BeatHistorySec {
+			t.Fatalf("Beats(0) returned stale beat t=%v, want nothing older than %v",
+				bt, end-BeatHistorySec)
+		}
+	}
+	if len(got) != 61 {
+		t.Errorf("Beats(0) returned %d beats, want 61 (t=1030..1090 survive a 60s history)", len(got))
+	}
+	if len(got) != len(h.beats) {
+		t.Errorf("Beats(0) returned %d but h.beats holds %d: since=0 should not "+
+			"filter anything further once eviction has already run", len(got), len(h.beats))
+	}
+}
+
+// TestIntervalWindowEvictsStaleIntervals pins the RMSSDWindowSec trim on
+// h.ivals: IntervalCount must not grow without bound as beats keep arriving.
+//
+// Same 90 one-second intervals as above; each AddBeat call trims h.ivals
+// against the current t. The interval closing at t=1000+i survives only if
+// 1000+i >= 1090-60 = 1030, i.e. i >= 30, leaving 61 of the 90 fed intervals.
+func TestIntervalWindowEvictsStaleIntervals(t *testing.T) {
+	h := NewHRV()
+	ms := make([]float64, 90)
+	for i := range ms {
+		ms[i] = 1000
+	}
+	addIntervals(h, 1000, ms)
+
+	if got := h.IntervalCount(); got != 61 {
+		t.Errorf("IntervalCount = %d, want 61: intervals older than RMSSDWindowSec "+
+			"(90 fed, 60s window) should have been evicted", got)
+	}
+}
