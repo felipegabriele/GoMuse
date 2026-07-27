@@ -85,6 +85,22 @@
     <div class="panel" id="panel-optics"></div>
   </details>
 
+  <details class="stage collapsible" id="stage-pulse" hidden open>
+    <summary>
+      <h2>Pulse</h2>
+      <span class="stage-note">
+        Heart rate and HRV, derived from the pulse stream
+      </span>
+    </summary>
+    <div class="pulse-readout">
+      <span class="pulse-stat"><b id="pulseBpm">—</b><em>bpm</em></span>
+      <span class="pulse-stat"><b id="pulseRmssd">—</b><em>ms RMSSD</em></span>
+      <span class="pulse-meta mono" id="pulseState">no pulse</span>
+      <span class="pulse-meta mono" id="pulseChannel"></span>
+    </div>
+    <div class="panel" id="panel-pulse"></div>
+  </details>
+
   <details class="stage collapsible" id="stage-acc">
     <summary><h2>Accelerometer</h2><span class="stage-note">X / Y / Z, g</span></summary>
     <div class="panel" id="panel-acc"></div>
