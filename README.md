@@ -10,6 +10,8 @@ The project is a Go port of the device and viewer layers of
 muse-lsl's decoding, timestamp correction, and EEG bandpass behavior while
 replacing the matplotlib viewer with a self-contained web application.
 
+![gomuse live dashboard](img/gomuse-dashboard.png)
+
 ## Features
 
 - Streams EEG, PPG, accelerometer, and gyroscope data over BLE
