@@ -36,18 +36,21 @@ Privacy & Security → Bluetooth**.
 
 ## Quick start
 
-Clone and build the project:
+Clone and install the command:
 
 ```sh
 git clone https://github.com/itsmostafa/gomuse.git
 cd gomuse
-go build -o ./bin/gomuse ./cmd/gomuse
+go install ./cmd/gomuse
 ```
+
+Make sure your Go binary directory (`GOBIN`, or `GOPATH/bin` by default) is on
+your `PATH`.
 
 Start the viewer with synthetic signals:
 
 ```sh
-./bin/gomuse stream -demo
+gomuse stream -demo
 ```
 
 Then open [http://localhost:1111](http://localhost:1111). Demo mode exercises
@@ -57,7 +60,7 @@ headband.
 If Task is installed, the equivalent commands are:
 
 ```sh
-task build
+task install
 task demo
 ```
 
@@ -66,21 +69,21 @@ task demo
 Power on the headband, take it out of its case, and scan for nearby devices:
 
 ```sh
-./bin/gomuse list
+gomuse list
 ```
 
 Connect to the strongest Muse found and start the viewer:
 
 ```sh
-./bin/gomuse stream
+gomuse stream
 ```
 
 For a predictable connection when several headbands are nearby, select one by
 name or by the CoreBluetooth UUID printed by `list`:
 
 ```sh
-./bin/gomuse stream -name MuseS-4A2B
-./bin/gomuse stream -address 01234567-89AB-CDEF-0123-456789ABCDEF
+gomuse stream -name MuseS-4A2B
+gomuse stream -address 01234567-89AB-CDEF-0123-456789ABCDEF
 ```
 
 The UUID is assigned by CoreBluetooth on the local Mac. It is not a Bluetooth
@@ -102,19 +105,19 @@ and suggests the appropriate flag for disabling it.
 Record until `Ctrl-C`:
 
 ```sh
-./bin/gomuse record -dir ./data
+gomuse record -dir ./data
 ```
 
 Record for a fixed duration:
 
 ```sh
-./bin/gomuse record -dir ./data -duration 60s
+gomuse record -dir ./data -duration 60s
 ```
 
 You can also view and record in the same session:
 
 ```sh
-./bin/gomuse stream -record-dir ./data
+gomuse stream -record-dir ./data
 ```
 
 Recordings are written as separate files because the streams have different
@@ -166,7 +169,7 @@ interrupted).
 Run a command with `-h` for the complete built-in help:
 
 ```sh
-./bin/gomuse stream -h
+gomuse stream -h
 ```
 
 ## Viewer controls
