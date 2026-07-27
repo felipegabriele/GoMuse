@@ -740,7 +740,138 @@ func TestPulseMessageNullsBeforeLock(t *testing.T) {
 	if !got {
 		t.Fatal("no pulse message produced")
 	}
-	if last.BPM != nil || last.RMSSD != nil {
-		t.Errorf("BPM=%v RMSSD=%v, want both nil before lock", last.BPM, last.RMSSD)
+	if last.BPM != nil || last.RMSSD != nil || last.IBIMs != nil {
+		t.Errorf("BPM=%v RMSSD=%v IBIMs=%v, want all nil before lock", last.BPM, last.RMSSD, last.IBIMs)
+	}
+}
+
+// pulseFlatChunk builds a single-sample, flat-signal Optics chunk at ts: the
+// pulse tracker's readout does not matter for these tests, only whether
+// pulseUpdate reports a message as due.
+func pulseFlatChunk(nch int, ts float64) sample.Chunk {
+	data := make([][]float64, nch)
+	for ch := range data {
+		data[ch] = []float64{100000}
+	}
+	return sample.Chunk{Stream: sample.Optics, Timestamps: []float64{ts}, Data: data}
+}
+
+// TestPulseUpdateResyncsAfterForwardTimestampOutlier pins the fix for a
+// wedged throttle: a single chunk stamped far in the future must not silence
+// every later, normally-stamped chunk forever.
+//
+// This is reachable in practice, not just in principle: on the classic PPG
+// path, internal/muse/timestamp.go's Dejitter.handleGap tolerates a counter
+// step of up to maxPlausibleGap packets, which at 64 Hz/6 samples-per-packet
+// can jump the time base by roughly 51 minutes on one corrupted counter. The
+// Athena path (used here) is immune to that specific cause because its index
+// is monotone, but pulseUpdate's throttle invariant must hold regardless of
+// how an outlier timestamp arises.
+func TestPulseUpdateResyncsAfterForwardTimestampOutlier(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+	m := set.MetaFor(sample.Optics)
+	nch := m.NumChannels()
+
+	// A corrupted timestamp far in the future. It is also this client's very
+	// first call, so it is unthrottled and sets nextPulse to roughly 1e12
+	// seconds ahead.
+	if _, ok := c.pulseUpdate(pulseFlatChunk(nch, 1e12)); !ok {
+		t.Fatal("outlier chunk did not produce a message (first-ever call must never be suppressed)")
+	}
+
+	// 10,000 subsequent chunks on a plausible clock, far below the outlier.
+	// Before the fix, every one of these satisfies now < nextPulse and the
+	// readout never recovers.
+	got := false
+	ts := 1000.0
+	for i := 0; i < 10000; i++ {
+		ts += 1.0 / m.Rate
+		if _, ok := c.pulseUpdate(pulseFlatChunk(nch, ts)); ok {
+			got = true
+			break
+		}
+	}
+	if !got {
+		t.Fatal("pulseUpdate never resumed sending after a forward timestamp outlier: the throttle is wedged")
+	}
+}
+
+// TestPulseUpdateThrottleRate covers the throttle itself, which
+// TestPulseMessageShapeWhenLocked cannot: that test keeps only the last of
+// many messages, so it cannot tell one-per-sample from one-per-interval.
+// Deleting pulseUpdate's throttle check must fail this test.
+func TestPulseUpdateThrottleRate(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+	m := set.MetaFor(sample.Optics)
+	nch := m.NumChannels()
+
+	if _, ok := c.pulseUpdate(pulseFlatChunk(nch, 1000)); !ok {
+		t.Fatal("first call was suppressed; it must never be, there being no prior schedule")
+	}
+
+	// 10 s of one-sample-at-a-time chunks at Optics' rate. At
+	// pulseIntervalSec = 0.25 that is up to 40 further messages; a
+	// one-per-sample regression would instead produce hundreds.
+	count := 1 // the first call above already counted
+	total := int(m.Rate * 10)
+	for i := 1; i < total; i++ {
+		ts := 1000 + float64(i)/m.Rate
+		if _, ok := c.pulseUpdate(pulseFlatChunk(nch, ts)); ok {
+			count++
+		}
+	}
+	if count < 35 || count > 45 {
+		t.Errorf("got %d messages over 10s at a 0.25s interval, want ~40 (35-45)", count)
+	}
+}
+
+// TestPulseUpdateThrottleIsPerClient guards against nextPulse becoming
+// package- or tracker-shared state: two independently-created clients must
+// not throttle each other.
+func TestPulseUpdateThrottleIsPerClient(t *testing.T) {
+	set := sample.Athena()
+	c1 := newClient(set)
+	c2 := newClient(set)
+	m := set.MetaFor(sample.Optics)
+	nch := m.NumChannels()
+
+	if _, ok := c1.pulseUpdate(pulseFlatChunk(nch, 1000)); !ok {
+		t.Fatal("c1's first message was suppressed")
+	}
+	if _, ok := c1.pulseUpdate(pulseFlatChunk(nch, 1000.01)); ok {
+		t.Fatal("c1's second call within the interval should have been throttled")
+	}
+
+	// c2 has never sent. If nextPulse were shared, c1's schedule would
+	// suppress this too.
+	if _, ok := c2.pulseUpdate(pulseFlatChunk(nch, 1000.01)); !ok {
+		t.Error("c2's first message was suppressed by c1's schedule: nextPulse must be per-client")
+	}
+}
+
+func TestPulseMessageBeatsNeverNull(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+	m := set.MetaFor(sample.Optics)
+	nch := m.NumChannels()
+
+	// No channel is selected yet (StateNoPulse): Snapshot leaves Beats nil,
+	// but the message must marshal beats as [] rather than null so the
+	// browser never has to special-case the type across states.
+	msg, ok := c.pulseUpdate(pulseFlatChunk(nch, 1000))
+	if !ok {
+		t.Fatal("first call was suppressed")
+	}
+	if msg.Beats == nil {
+		t.Fatal("Beats is nil, want a non-nil (possibly empty) slice")
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"beats":null`) {
+		t.Errorf("marshalled beats as null: %s", b)
 	}
 }

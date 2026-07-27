@@ -321,7 +321,12 @@ type client struct {
 	dc   *dsp.DCBlockerBank
 
 	// Pulse tracking, writer-goroutine-owned like the DSP banks above.
-	// tracker is nil when the device has no pulse stream at all.
+	// tracker is nil when the device has no pulse stream at all. pulseID's
+	// zero value is sample.EEG (StreamID 0), which would wrongly match an EEG
+	// chunk — but pulseUpdate checks tracker == nil first, and tracker stays
+	// nil on exactly the devices where pulseID is never set, so the
+	// coincidence is harmless. Kept as a plain zero value rather than a
+	// sentinel because the guard already makes it correct.
 	tracker    *pulse.Tracker
 	pulseID    sample.StreamID
 	pulseNames []string
@@ -370,16 +375,33 @@ func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
 	c.tracker.Process(chunk.Data, chunk.Timestamps)
 
 	now := chunk.Timestamps[chunk.NumSamples()-1]
-	if now < c.nextPulse {
+	// In normal operation now advances by roughly one sample step per call,
+	// so it sits within one interval below nextPulse while throttled. If it
+	// is further behind than that, nextPulse was not set from a plausible
+	// now: either a corrupted timestamp jumped far into the future (the
+	// classic path's Dejitter tolerates large counter steps, see
+	// internal/muse/timestamp.go) or the clock stepped backwards by more
+	// than an interval. Either way, waiting for the stale nextPulse to
+	// arrive would wedge the readout silent forever, so resync to now and
+	// send immediately instead.
+	if now < c.nextPulse && now >= c.nextPulse-pulseIntervalSec {
 		return PulseMessage{}, false
 	}
 	c.nextPulse = now + pulseIntervalSec
 
 	snap := c.tracker.Snapshot()
+	beats := snap.Beats
+	if beats == nil {
+		// Snapshot leaves Beats nil when no channel is selected. Normalise to
+		// an empty slice so the JSON shape (an array) is consistent across
+		// states rather than sometimes null, sometimes [] — the browser
+		// should not have to special-case that.
+		beats = []float64{}
+	}
 	msg := PulseMessage{
 		Type:      "pulse",
 		State:     string(snap.State),
-		Beats:     snap.Beats,
+		Beats:     beats,
 		BeatCount: snap.BeatCount,
 	}
 	if snap.Channel >= 0 && snap.Channel < len(c.pulseNames) {
