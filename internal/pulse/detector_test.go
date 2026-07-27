@@ -96,11 +96,81 @@ func TestDetectorContiguousBlocksReportNoGap(t *testing.T) {
 	const rate = 64.0
 	samples, ts := pulseTrain(int(rate*10), rate, 72, 100000, 0.04)
 
+	// A single whole-buffer call establishes the ground truth for how many
+	// beats this waveform contains.
+	whole := NewDetector(rate)
+	wantBeats, _ := whole.Process(samples, ts)
+
 	d := NewDetector(rate)
-	// Feed in 16-sample blocks, as real chunks arrive.
+	var gotBeats []float64
+	// Feed in 16-sample blocks, as real chunks arrive. A regression that
+	// resets prev/prevPrev/have at the top of every Process call would break
+	// mid-pulse detection at chunk boundaries while still reporting no gaps,
+	// so the beat count -- not just the gap flag -- must match the
+	// whole-buffer run.
 	for i := 0; i+16 <= len(samples); i += 16 {
-		if _, gap := d.Process(samples[i:i+16], ts[i:i+16]); gap {
+		beats, gap := d.Process(samples[i:i+16], ts[i:i+16])
+		if gap {
 			t.Fatalf("gap reported at contiguous block starting %d", i)
 		}
+		gotBeats = append(gotBeats, beats...)
+	}
+
+	if len(gotBeats) != len(wantBeats) {
+		t.Fatalf("chunked processing found %d beats, whole-buffer processing found %d: cross-call state was not preserved", len(gotBeats), len(wantBeats))
+	}
+	for i := range wantBeats {
+		if gotBeats[i] != wantBeats[i] {
+			t.Fatalf("beat %d differs: chunked %.6f vs whole-buffer %.6f", i, gotBeats[i], wantBeats[i])
+		}
+	}
+}
+
+// TestDetectorFirstBeatUnderRefractoryWindow pins the first-beat guarantee to
+// whether a beat has actually been accepted, not to whether Process has run.
+//
+// The first block here is deliberately shorter than one pulse period, so
+// Process runs to completion without finding a beat. If the refractory check
+// were gated on "Process has run before" rather than "a beat has been
+// accepted", the second block's genuine first beat -- which lands well under
+// RefractorySec on this zero-based clock -- would be measured against a
+// phantom beat at t=0 and rejected.
+func TestDetectorFirstBeatUnderRefractoryWindow(t *testing.T) {
+	const rate, bpm = 64.0, 72.0
+	hz := bpm / 60
+	n := int(rate * 2)
+	samples := make([]float64, n)
+	ts := make([]float64, n)
+	for i := range samples {
+		e := float64(i) / rate
+		phase := math.Mod(e*hz, 1)
+		bump := math.Exp(-(phase - 0.2) / 0.12 * ((phase - 0.2) / 0.12))
+		samples[i] = 100000 * (1 + 0.04*bump)
+		ts[i] = e // zero-based, unlike pulseTrain's 1000+e Unix-like offset
+	}
+
+	d := NewDetector(rate)
+
+	// First block: 8 samples (~0.109 s), ending before the systolic peak at
+	// ~0.167 s.
+	beats1, gap1 := d.Process(samples[:8], ts[:8])
+	if gap1 {
+		t.Fatal("unexpected gap on first block")
+	}
+	if len(beats1) != 0 {
+		t.Fatalf("first block already reports a beat (%v); test no longer exercises the no-beat-yet case", beats1)
+	}
+
+	beats2, gap2 := d.Process(samples[8:], ts[8:])
+	if gap2 {
+		t.Fatal("unexpected gap on second block")
+	}
+	// The true first beat sits at ~0.167 s, under RefractorySec. Gating
+	// acceptance on "Process has run" instead of "a beat was accepted" rejects
+	// it against a phantom beat at t=0 and only picks up the *second* real
+	// beat, roughly one period (~0.833 s) later -- so this must check the
+	// earliest beat's timing, not merely that some beat was found.
+	if len(beats2) == 0 || beats2[0] >= RefractorySec {
+		t.Fatalf("first true beat (expected near t=0.167s, under RefractorySec=%.3fs) was rejected by the refractory check against a phantom beat at t=0; got beats %v", RefractorySec, beats2)
 	}
 }

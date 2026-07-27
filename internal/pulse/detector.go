@@ -60,7 +60,15 @@ type Detector struct {
 	prevTS         float64
 	have           int
 
+	// haveBeat is distinct from primed: primed only means Process has run
+	// before (so lastTS is meaningful for gap detection), while haveBeat means
+	// a beat has actually been accepted (so lastBeat is meaningful for the
+	// refractory check). A block shorter than one pulse period can run
+	// Process without finding a beat, and gating the refractory check on
+	// primed would then test a genuine first beat against a stale lastBeat of
+	// 0 — harmless on Unix-epoch timestamps but wrong on a zero-based clock.
 	lastBeat float64
+	haveBeat bool
 	lastTS   float64
 	primed   bool
 }
@@ -113,10 +121,10 @@ func (d *Detector) Process(samples, timestamps []float64) (beats []float64, gap 
 		if d.have >= 2 {
 			threshold := PeakFraction * d.peak
 			isPeak := d.prev > d.prevPrev && d.prev >= s && d.prev > threshold
-			if isPeak && (!d.primed || d.prevTS-d.lastBeat >= RefractorySec) {
+			if isPeak && (!d.haveBeat || d.prevTS-d.lastBeat >= RefractorySec) {
 				beats = append(beats, d.prevTS)
 				d.lastBeat = d.prevTS
-				d.primed = true
+				d.haveBeat = true
 			}
 		}
 
@@ -135,7 +143,7 @@ func (d *Detector) Process(samples, timestamps []float64) (beats []float64, gap 
 // Reset clears all state, as when the selected channel changes.
 func (d *Detector) Reset() {
 	d.resetSignalState()
-	d.lastBeat, d.lastTS, d.primed = 0, 0, false
+	d.lastBeat, d.haveBeat, d.lastTS, d.primed = 0, false, 0, false
 }
 
 // resetSignalState clears everything derived from sample values, leaving the
