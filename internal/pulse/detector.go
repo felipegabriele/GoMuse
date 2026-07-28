@@ -25,10 +25,38 @@ const (
 	// sample-rate noise without blunting the systolic rise.
 	SmoothTaps = 5
 
-	// GapPeriods is how far apart two consecutive samples may be before the
-	// stream is treated as having lost data. 1.5 periods tolerates ordinary
-	// jitter in the dejittered timestamps while catching a single lost packet.
-	GapPeriods = 1.5
+	// ChainBreakSec and SignalResetSec are the two thresholds for a hole in the
+	// stream. They are deliberately separate, and deliberately absolute seconds
+	// rather than sample periods: both are about physiology and filter time
+	// constants, not about the stream's rate.
+	//
+	// Data loss is routine here, not exceptional. internal/hub drops newest on a
+	// full buffer and a browser subscriber drops routinely by design (CLAUDE.md),
+	// and on a Muse S Athena optics tag 0x36 carries one sample per packet
+	// (internal/muse/athena.go), so a single dropped chunk is a single missing
+	// sample — a ~16 ms hole at 64 Hz. Reacting to that as lost data is what
+	// made the feature unable to lock at all at about one drop per second:
+	// every interval chain segment was then shorter than one beat period, so no
+	// interval ever formed.
+	//
+	// ChainBreakSec: a hole only corrupts an *interval* if it is long enough to
+	// shift or hide a beat. Beat times come from real timestamps, not sample
+	// counts, so a hole of H seconds shifts a detected beat by at most H. RMSSD
+	// measures successive differences on the order of 20-60 ms, and one
+	// perturbed term among the ~70 in a 60 s window moves the result
+	// negligibly, so holes up to 50 ms are tolerated rather than breaking the
+	// chain. This is the tradeoff the spec's gap-detection section reasons
+	// about, resolved in favour of a metric that can actually lock.
+	ChainBreakSec = 0.05
+
+	// SignalResetSec is the much longer hole at which the DC blocker's history
+	// and the running peak estimate are genuinely stale and worth throwing
+	// away. Both have time constants of seconds — dcCornerHz is 0.5 Hz and
+	// PeakTauSec is 3 s — so half a second is where restarting them costs less
+	// than carrying them. Resetting on every single lost sample was the
+	// aggravating factor that turned a 16 ms hole into a lost beat, because it
+	// discarded ~3 s of peak adaptation each time.
+	SignalResetSec = 0.5
 
 	// dcCornerHz is the DC blocker corner. The pedestal is ~100000 counts and
 	// the pulse ~4000, so removing DC is what makes a fixed threshold possible
@@ -89,9 +117,10 @@ func NewDetector(rate float64) *Detector {
 }
 
 // Process feeds one channel's samples and their timestamps, returning the beat
-// timestamps found within this call. gap reports that samples were lost between
-// the previous call and this one, so the caller must not form an interval
-// across the boundary.
+// timestamps found within this call. gap reports a hole longer than
+// ChainBreakSec between the previous call and this one, so the caller must not
+// form an interval across the boundary. Shorter holes are tolerated silently;
+// see the constant's comment for why.
 //
 // samples and timestamps must be the same length and are not modified.
 func (d *Detector) Process(samples, timestamps []float64) (beats []float64, gap bool) {
@@ -99,12 +128,21 @@ func (d *Detector) Process(samples, timestamps []float64) (beats []float64, gap 
 		return nil, false
 	}
 
-	if d.primed && timestamps[0]-d.lastTS > GapPeriods*d.period {
-		// Data was lost. The filter and peak state describe a signal that no
-		// longer continues, so start them over rather than carrying a stale
-		// history across the discontinuity.
-		gap = true
-		d.resetSignalState()
+	if d.primed {
+		// hole is the missing time, not the arrival delta: consecutive samples
+		// are one period apart, so that period is not a hole.
+		hole := timestamps[0] - d.lastTS - d.period
+		if hole > ChainBreakSec {
+			// Long enough to shift or hide a beat, so the caller must not form
+			// an interval across it.
+			gap = true
+		}
+		if hole > SignalResetSec {
+			// Long enough that the filter and peak state describe a signal that
+			// no longer continues; start them over rather than carrying a stale
+			// history across the discontinuity.
+			d.resetSignalState()
+		}
 	}
 
 	filtered := d.dc.Process(samples)

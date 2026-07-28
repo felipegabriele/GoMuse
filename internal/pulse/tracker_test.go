@@ -21,6 +21,48 @@ func feed(tr *Tracker, data [][]float64, ts []float64, chunk int) {
 	}
 }
 
+// feedWithDrops pushes one sample per call, as an Athena does — optics tag 0x36
+// carries a single sample per packet (internal/muse/athena.go) — discarding
+// every dropEvery'th sample so its timestamp is simply missing. That is exactly
+// what a hub drop looks like downstream: internal/hub drops newest on a full
+// buffer and CLAUDE.md notes a browser subscriber drops routinely by design.
+// dropEvery of 0 drops nothing.
+func feedWithDrops(tr *Tracker, ch, ts []float64, dropEvery int) {
+	for i := range ts {
+		if dropEvery > 0 && i%dropEvery == dropEvery-1 {
+			continue
+		}
+		tr.Process([][]float64{ch[i : i+1]}, ts[i:i+1])
+	}
+}
+
+// Routine sample loss must not stop the feature from locking. Holes of a single
+// sample are the common case on the target device, and treating each one as lost
+// data — breaking the interval chain and wiping the filter and peak state — used
+// to leave the tracker permanently in acquiring at around one drop per second,
+// because every chain segment was then shorter than one beat period.
+func TestTrackerLocksDespiteDroppedSamples(t *testing.T) {
+	const rate, bpm = 64.0, 72.0
+
+	for _, dropEvery := range []int{0, 640, 128, 64, 32} {
+		pulseCh, ts := pulseTrain(int(rate*60), rate, bpm, 100000, 0.04)
+		tr := NewTracker(rate, 1)
+		feedWithDrops(tr, pulseCh, ts, dropEvery)
+
+		snap := tr.Snapshot()
+		t.Logf("1 drop per %-4d: state=%-9s bpm=%.1f hasBPM=%v intervals=%d",
+			dropEvery, snap.State, snap.BPM, snap.HasBPM, tr.hrv.IntervalCount())
+
+		if snap.State != StateLocked {
+			t.Errorf("drop 1 per %d: State = %q, want %q", dropEvery, snap.State, StateLocked)
+			continue
+		}
+		if math.Abs(snap.BPM-bpm) > 3 {
+			t.Errorf("drop 1 per %d: BPM = %.1f, want %.0f +/- 3", dropEvery, snap.BPM, bpm)
+		}
+	}
+}
+
 func TestTrackerLocksOntoPulseAndReportsRate(t *testing.T) {
 	const rate, bpm = 64.0, 72.0
 	pulseCh, ts := pulseTrain(int(rate*60), rate, bpm, 100000, 0.04)
@@ -122,6 +164,62 @@ func TestTrackerBreaksIntervalChainAcrossGap(t *testing.T) {
 	if got := tr.hrv.IntervalCount(); got != snap.BeatCount-2 {
 		t.Errorf("IntervalCount = %d with %d beats, want %d: an interval spans the gap",
 			got, snap.BeatCount, snap.BeatCount-2)
+	}
+}
+
+// Taking the headband off and putting it back on must go through acquiring.
+// Retaining the pre-loss intervals let BPM's 7-interval median keep reporting the
+// old rate as locked for several beats after the pulse returned.
+func TestTrackerReacquiresAfterLosingThePulse(t *testing.T) {
+	const rate = 64.0
+
+	beat, ts := pulseTrain(int(rate*30), rate, 72, 100000, 0.04)
+	tr := NewTracker(rate, 1)
+	feed(tr, [][]float64{beat}, ts, 16)
+	snap := tr.Snapshot()
+	if snap.State != StateLocked || !snap.HasBPM {
+		t.Fatalf("State = %q HasBPM = %v after 30 s of pulse, want %q with a rate",
+			snap.State, snap.HasBPM, StateLocked)
+	}
+	stale := snap.BPM
+
+	// Headband off: the channel stops modulating and the selector drops it.
+	flat, fts := pulseTrain(int(rate*8), rate, 72, 100000, 0.0002)
+	for i := range fts {
+		fts[i] = ts[len(ts)-1] + float64(i+1)/rate
+	}
+	feed(tr, [][]float64{flat}, fts, 16)
+	snap = tr.Snapshot()
+	if snap.State != StateNoPulse || snap.Channel != -1 {
+		t.Fatalf("State = %q Channel = %d after 8 s flat, want %q and -1",
+			snap.State, snap.Channel, StateNoPulse)
+	}
+	if got := tr.hrv.IntervalCount(); got != 0 {
+		t.Errorf("IntervalCount = %d after losing the pulse, want 0: intervals "+
+			"measured before the loss were retained", got)
+	}
+
+	// Back on, and at a distinctly different rate so a stale readout is
+	// unmistakable.
+	slow, sts := pulseTrain(int(rate*5), rate, 40, 100000, 0.04)
+	for i := range sts {
+		sts[i] = fts[len(fts)-1] + float64(i+1)/rate
+	}
+	for i := 0; i < len(sts); i += 16 {
+		end := i + 16
+		if end > len(sts) {
+			end = len(sts)
+		}
+		tr.Process([][]float64{slow[i:end]}, sts[i:end])
+		if s := tr.Snapshot(); s.HasBPM && math.Abs(s.BPM-stale) < 1 {
+			t.Fatalf("reported the pre-loss rate %.1f bpm as %q after regaining "+
+				"the pulse at 40 bpm", s.BPM, s.State)
+		}
+	}
+	// Five seconds at 40 bpm is at most three beats, so fewer than
+	// LockIntervals intervals can have formed.
+	if got := tr.Snapshot().State; got != StateAcquiring {
+		t.Errorf("State = %q 5 s after regaining the pulse, want %q", got, StateAcquiring)
 	}
 }
 

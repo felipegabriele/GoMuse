@@ -69,10 +69,15 @@ func (t *Tracker) Process(data [][]float64, timestamps []float64) {
 
 	if ch != t.channel {
 		// The new channel has a different pedestal and unrelated phase, so the
-		// filter history and the pending interval both describe a signal that
-		// is no longer being watched.
+		// filter history describes a signal that is no longer being watched.
 		t.det.Reset()
-		t.hrv.Break()
+		// A full Reset, not merely Break: every accumulated interval was
+		// measured on a channel that is no longer selected, and this branch also
+		// covers losing the pulse entirely (ch going to -1) and regaining it.
+		// Keeping them would let BPM's 7-interval median report the pre-loss
+		// rate as locked for several beats after the headband is put back on,
+		// skipping acquiring — which defeats the point of having three states.
+		t.hrv.Reset()
 		t.channel = ch
 	}
 	if ch < 0 || ch >= len(data) {
