@@ -183,30 +183,43 @@ Readouts: bpm, RMSSD, selected channel name, and lock state.
 - Successive intervals differing by more than 20%: excluded from RMSSD.
 - **Gaps in the stream are detected explicitly, not inferred from interval
   length.** The detector compares each chunk's first timestamp against the last
-  sample it saw; a jump of more than 1.5 sample periods means samples were lost,
-  and the interval spanning that gap is discarded.
+  sample it saw. Two thresholds, both in absolute seconds because they are about
+  physiology and filter time constants rather than sample rate:
 
-  Relying on the 300–2000 ms bound to catch this, as an earlier draft of this
+  - `ChainBreakSec` (50 ms) — above this, the interval spanning the hole is
+    discarded.
+  - `SignalResetSec` (0.5 s) — above this, the DC blocker history and peak
+    estimate are additionally thrown away as stale.
+
+  Relying on the 300–2000 ms interval bound instead, as the first draft of this
   spec did, is wrong: a gap that swallows one beat turns an 880 ms interval into
-  ~1760 ms, which passes the bound.
-
-  A correction to that draft's reasoning, which claimed such an interval would
-  double the reported RMSSD: it would not. A merged interval is ~2x its
+  ~1760 ms, which passes the bound. That draft also claimed such an interval
+  would double the reported RMSSD. It would not — a merged interval is ~2x its
   neighbours, so the >20% ectopic filter already excludes both differences it
-  participates in. The doubled-RMSSD claim was wrong.
+  participates in.
 
-  The residual risk is subtler and is the actual justification. A gap shorter
-  than one beat does not merge intervals; it shifts a single detected beat time
-  by the length of the gap. That produces a pair of small interval errors which
-  can sit *below* the 20% ectopic threshold and so pass straight into RMSSD —
-  and RMSSD is precisely a measure of small beat-to-beat differences, so
-  corrupting it with sub-threshold timing noise is the worst case for this
-  metric. Gap detection catches these; the ectopic filter cannot.
+  The real justification is subtler. A hole shorter than one beat does not merge
+  intervals; it shifts one detected beat time by up to the length of the hole,
+  producing small interval errors that can sit *below* the ectopic threshold and
+  pass straight into RMSSD. Since RMSSD *is* a measure of small beat-to-beat
+  differences, that is the worst case for this metric, and the ectopic filter
+  cannot catch it.
 
-  This is not a rare case: `internal/hub` drops newest on a full buffer and a
-  browser subscriber drops routinely by design, so gaps are expected rather than
-  exceptional. Detecting data loss where it happens is also simply more sound
-  than masking it with a downstream heuristic.
+  **But a second draft of this spec over-applied that argument, and the result
+  could not lock at all.** It welded both reactions together at 1.5 sample
+  periods. On an Athena, optics tag `0x36` carries one sample per packet, so a
+  single dropped hub chunk is a gap — and `internal/hub` drops newest, with a
+  browser subscriber dropping routinely by design. Measured at roughly one drop
+  per second, every chain segment was shorter than one beat period, so *zero*
+  intervals ever formed and the panel sat in `acquiring` indefinitely while the
+  raw trace looked perfect.
+
+  Hence the split. A hole under 50 ms shifts a beat by at most 50 ms, and one
+  perturbed term among the ~70 differences in the window moves RMSSD
+  negligibly — so tolerating it costs almost nothing in precision and is what
+  makes the feature work on the target device at all. Wiping 3 s of peak
+  adaptation and re-priming the DC blocker for every 16 ms hole was the
+  aggravating factor that turned a missing sample into a missing beat.
 
 ## Testing
 
