@@ -98,6 +98,56 @@ func TestDetectorReportsGap(t *testing.T) {
 	}
 }
 
+// The two hole thresholds must stay genuinely separate, in both directions.
+// Welding them together is what stopped the feature locking under routine
+// sample loss, so a hole that breaks the interval chain must still be able to
+// leave the filter and peak state alone.
+//
+// The signal state after a reset is compared against a brand-new detector fed
+// the same post-hole samples, the same technique
+// TestTrackerResetsOnChannelSwitch uses.
+func TestDetectorResetsSignalStateOnlyForLongHoles(t *testing.T) {
+	const rate = 64.0
+	const tail = 4 // post-hole samples: fewer than SmoothTaps, so state is easy to compare
+
+	after := func(holeSec float64) *Detector {
+		samples, ts := pulseTrain(int(rate*10), rate, 72, 100000, 0.04)
+		d := NewDetector(rate)
+		d.Process(samples, ts)
+
+		next, nts := pulseTrain(tail, rate, 72, 100000, 0.04)
+		for i := range nts {
+			nts[i] = ts[len(ts)-1] + holeSec + float64(i+1)/rate
+		}
+		if _, gap := d.Process(next, nts); !gap {
+			t.Fatalf("hole of %.2f s reported no gap, want the chain broken", holeSec)
+		}
+		return d
+	}
+
+	// A detector that has only ever seen the post-hole samples.
+	fresh := NewDetector(rate)
+	next, nts := pulseTrain(tail, rate, 72, 100000, 0.04)
+	fresh.Process(next, nts)
+
+	// Just over ChainBreakSec but well under SignalResetSec: the chain breaks,
+	// the ~3 s of peak adaptation and the DC blocker history are kept.
+	short := after(0.1)
+	if short.peak == fresh.peak {
+		t.Errorf("peak after a 0.1 s hole = %g, same as a fresh detector: signal "+
+			"state was reset for a hole under SignalResetSec=%.2f", short.peak, SignalResetSec)
+	}
+
+	// Well over SignalResetSec: the history describes a signal that no longer
+	// continues, so it goes.
+	long := after(2.0)
+	if long.peak != fresh.peak || long.have != fresh.have {
+		t.Errorf("state after a 2 s hole = {have:%d peak:%g}, want a fresh detector's "+
+			"{have:%d peak:%g}: signal state was not reset above SignalResetSec=%.2f",
+			long.have, long.peak, fresh.have, fresh.peak, SignalResetSec)
+	}
+}
+
 func TestDetectorContiguousBlocksReportNoGap(t *testing.T) {
 	const rate = 64.0
 	samples, ts := pulseTrain(int(rate*10), rate, 72, 100000, 0.04)
