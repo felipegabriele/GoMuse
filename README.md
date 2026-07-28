@@ -18,6 +18,7 @@ replacing the matplotlib viewer with a self-contained web application.
 - Supports classic Muse 2 and Muse S devices, plus Muse S Athena (Gen 3)
 - Serves a responsive live viewer from a single compiled binary
 - Provides an optional 1–40 Hz EEG display filter
+- Derives live heart rate and RMSSD heart-rate variability from the pulse stream
 - Records one timestamped CSV file per sensor stream
 - Includes a synthetic signal mode for trying the viewer without a headband
 - Embeds all browser assets and requires no internet access at runtime
@@ -183,7 +184,7 @@ gomuse stream -h
 ## Viewer controls
 
 The browser viewer shows one trace per EEG electrode, with collapsible panels
-for PPG and motion data. You can change the visible time window, adjust EEG
+for pulse and motion data. You can change the visible time window, adjust EEG
 amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard:
 
 | Key | Action |
@@ -193,6 +194,25 @@ amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard
 | `+` | Lengthen the time window |
 | `-` | Shorten the time window |
 | `d` | Toggle the EEG display filter |
+
+The **Pulse** panel appears whenever the headband has a pulse sensor — PPG on a
+classic Muse, optics on an Athena. It plots whichever channel currently carries
+the strongest pulse, overlays a marker on each detected beat, and reads out:
+
+| Readout      | Meaning                                                      |
+| ------------ | ------------------------------------------------------------ |
+| bpm          | Heart rate, the median of the last few beat-to-beat intervals |
+| ms RMSSD     | Heart-rate variability over the last 60 s                     |
+| ms last beat | The most recent beat-to-beat interval                         |
+| state        | `no pulse`, `acquiring`, or `locked`                          |
+| channel      | The channel the numbers are being derived from                |
+
+Numbers are shown only in the `locked` state, so the panel never displays a
+fabricated rate: `no pulse` means no channel carries enough modulation — usually
+the headband is not on properly — and `acquiring` means it does but too few clean
+beats have accumulated yet. RMSSD additionally waits for about 30 s of beats,
+because it is not meaningful over less. Expect a few seconds to reach `locked`,
+and the same again after moving the headband.
 
 The server also exposes `GET /healthz`, which reports its status, connected
 viewer count, and dropped display chunks as JSON.
