@@ -38,16 +38,26 @@ const (
 )
 
 // interval is one accepted beat-to-beat gap, tagged with when it ended so the
-// analysis window can be trimmed by time rather than by count.
+// analysis window can be trimmed by time rather than by count, and with which
+// unbroken run of beats it belongs to.
 type interval struct {
 	at float64 // Unix seconds of the closing beat
 	ms float64
+
+	// chain identifies the run of contiguous beats this interval came from.
+	// Break starts a new one. RMSSD is a measure of *successive* differences, so
+	// differencing the last interval of one run against the first of the next
+	// would invent a variation that was never observed: two clean segments of
+	// 800 ms and 820 ms either side of a hole would report an RMSSD of 2.857 ms
+	// where the truth is 0.
+	chain int
 }
 
 // HRV turns a stream of beat timestamps into a rate and an RMSSD figure.
 type HRV struct {
 	last     float64
 	haveLast bool
+	chain    int
 
 	ivals []interval
 	beats []float64
@@ -69,7 +79,7 @@ func (h *HRV) AddBeat(t float64) {
 
 	if h.haveLast {
 		if ms := (t - h.last) * 1000; ms >= MinIntervalMs && ms <= MaxIntervalMs {
-			h.ivals = append(h.ivals, interval{at: t, ms: ms})
+			h.ivals = append(h.ivals, interval{at: t, ms: ms, chain: h.chain})
 			cut := t - RMSSDWindowSec
 			i := 0
 			for i < len(h.ivals) && h.ivals[i].at < cut {
@@ -83,7 +93,10 @@ func (h *HRV) AddBeat(t float64) {
 
 // Break marks a discontinuity: the next beat starts a new interval chain rather
 // than closing one across lost data. See the Detector's gap return.
-func (h *HRV) Break() { h.haveLast = false }
+func (h *HRV) Break() {
+	h.haveLast = false
+	h.chain++
+}
 
 // IntervalCount returns how many accepted intervals are in the window.
 func (h *HRV) IntervalCount() int { return len(h.ivals) }
@@ -128,11 +141,7 @@ func (h *HRV) RMSSD() (float64, bool) {
 	if span < RMSSDMinSpanSec {
 		return 0, false
 	}
-	ms := make([]float64, len(h.ivals))
-	for i, v := range h.ivals {
-		ms[i] = v.ms
-	}
-	return rmssdOf(ms)
+	return rmssdOfIntervals(h.ivals)
 }
 
 // Beats returns the beat timestamps at or after since, oldest first.
@@ -148,7 +157,7 @@ func (h *HRV) Beats(since float64) []float64 {
 
 // Reset clears all accumulated state.
 func (h *HRV) Reset() {
-	h.last, h.haveLast = 0, false
+	h.last, h.haveLast, h.chain = 0, false, 0
 	h.ivals = h.ivals[:0]
 	h.beats = h.beats[:0]
 }
@@ -169,16 +178,32 @@ func medianOf(ms []float64) float64 {
 	return (s[mid-1] + s[mid]) / 2
 }
 
-// rmssdOf is the root mean square of successive differences, excluding pairs
-// whose fractional difference exceeds EctopicRatio. It reports false when too
-// few differences survive to mean anything.
+// rmssdOf is the root mean square of successive differences over a plain
+// sequence of intervals, all treated as one unbroken chain. It exists as a pure
+// function of a []float64 so the golden-value test can pin the arithmetic
+// without constructing intervals.
 func rmssdOf(ms []float64) (float64, bool) {
-	if len(ms) < 2 {
+	ivals := make([]interval, len(ms))
+	for i, v := range ms {
+		ivals[i] = interval{ms: v}
+	}
+	return rmssdOfIntervals(ivals)
+}
+
+// rmssdOfIntervals is the same computation, but it also skips any pair spanning
+// a chain boundary — see interval.chain. Pairs whose fractional difference
+// exceeds EctopicRatio are excluded, and it reports false when too few
+// differences survive to mean anything.
+func rmssdOfIntervals(ivals []interval) (float64, bool) {
+	if len(ivals) < 2 {
 		return 0, false
 	}
 	sum, n := 0.0, 0
-	for i := 1; i < len(ms); i++ {
-		a, b := ms[i-1], ms[i]
+	for i := 1; i < len(ivals); i++ {
+		if ivals[i].chain != ivals[i-1].chain {
+			continue // successive in the slice, but not in the signal
+		}
+		a, b := ivals[i-1].ms, ivals[i].ms
 		lo := math.Min(a, b)
 		if lo <= 0 {
 			continue

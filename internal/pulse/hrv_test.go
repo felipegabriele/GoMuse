@@ -128,6 +128,43 @@ func TestBreakPreventsIntervalAcrossGap(t *testing.T) {
 	}
 }
 
+// RMSSD must not difference the last interval before a Break against the first
+// one after it. Those two intervals are adjacent in the ring but not successive
+// in the signal, and a step between two internally-steady segments is exactly
+// the sort of small difference the ectopic filter lets through — so without the
+// chain tag it lands straight in the metric.
+func TestRMSSDIgnoresPairsSpanningABreak(t *testing.T) {
+	h := NewHRV()
+	steady := func(ms float64, n int) []float64 {
+		out := make([]float64, n)
+		for i := range out {
+			out[i] = ms
+		}
+		return out
+	}
+
+	end := addIntervals(h, 1000, steady(800, 20))
+	h.Break()
+	addIntervals(h, end+3.0, steady(820, 20)) // a 3 s hole, then a second clean run
+
+	if got := h.IntervalCount(); got != 40 {
+		t.Fatalf("IntervalCount = %d, want 40: both runs' intervals should be kept", got)
+	}
+	got, ok := h.RMSSD()
+	if !ok {
+		t.Fatal("RMSSD not reported over two runs spanning 35 s")
+	}
+	// Every difference within each run is 0. The only nonzero candidate is the
+	// 800 -> 820 step across the break, whose 2.5% ratio passes the ectopic
+	// filter, so anything above 0 means that pair was counted. The tolerance
+	// absorbs the ~1e-11 ms of float error in accumulating beat times; counting
+	// the spanning pair would give about 3.2 ms.
+	if got > 1e-6 {
+		t.Errorf("RMSSD = %v over two internally-steady runs, want 0: a pair "+
+			"spanning the break was differenced", got)
+	}
+}
+
 func TestRMSSDWithheldUntilSpanAccumulates(t *testing.T) {
 	h := NewHRV()
 	// Six intervals is about 5 s, well under RMSSDMinSpanSec.
