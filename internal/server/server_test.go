@@ -689,6 +689,71 @@ func TestPulseMessageShapeWhenLocked(t *testing.T) {
 	}
 }
 
+// TestPulseUpdateDoesNotMutateTheChunk pins the invariant CLAUDE.md calls out:
+// the same sample.Chunk is handed to every hub subscriber, so a consumer that
+// writes through it corrupts every other viewer's data. The existing coverage of
+// this only reaches the EEG filter banks; the pulse tracker is the newest
+// consumer and was guarded by review alone.
+//
+// The whole pipeline is exercised, not one call: the selector's rolling buffer,
+// the DC blocker, the smoother and the peak tracker all read the caller's slices,
+// and enough samples are fed for the selector to actually rank and choose.
+func TestPulseUpdateDoesNotMutateTheChunk(t *testing.T) {
+	set := sample.Athena()
+	c := newClient(set)
+	m := set.MetaFor(sample.Optics)
+	rate, nch := m.Rate, m.NumChannels()
+
+	total := int(rate * 20)
+	for i := 0; i < total; i++ {
+		e := float64(i) / rate
+		phase := math.Mod(e*1.2, 1)
+		d := (phase - 0.2) / 0.12
+		bump := math.Exp(-(d * d))
+
+		data := make([][]float64, nch)
+		for ch := range data {
+			mod := 0.0002
+			if ch == 12 {
+				mod = 0.04
+			}
+			data[ch] = []float64{100000 * (1 + mod*bump)}
+		}
+		ts := []float64{1000 + e}
+
+		// Copies taken before the call, compared bit-for-bit after it: any
+		// in-place scaling, filtering or centring shows up immediately.
+		wantData := make([][]float64, nch)
+		for ch := range data {
+			wantData[ch] = append([]float64(nil), data[ch]...)
+		}
+		wantTS := append([]float64(nil), ts...)
+
+		c.pulseUpdate(sample.Chunk{Stream: sample.Optics, Timestamps: ts, Data: data})
+
+		for ch := range data {
+			for s := range data[ch] {
+				if data[ch][s] != wantData[ch][s] {
+					t.Fatalf("sample %d: Data[%d][%d] = %v after pulseUpdate, want %v unchanged",
+						i, ch, s, data[ch][s], wantData[ch][s])
+				}
+			}
+		}
+		for s := range ts {
+			if ts[s] != wantTS[s] {
+				t.Fatalf("sample %d: Timestamps[%d] = %v after pulseUpdate, want %v unchanged",
+					i, s, ts[s], wantTS[s])
+			}
+		}
+	}
+
+	// A tracker that never selected a channel would leave most of the chain
+	// untouched, so the invariant would hold for the wrong reason.
+	if snap := c.tracker.Snapshot(); snap.Channel != 12 {
+		t.Errorf("tracker selected channel %d, want 12: the full chain was not exercised", snap.Channel)
+	}
+}
+
 func TestPulseUpdateIgnoresNonPulseStreams(t *testing.T) {
 	c := newClient(sample.Athena())
 	eeg := sample.Chunk{

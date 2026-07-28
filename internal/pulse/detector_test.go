@@ -46,19 +46,25 @@ func TestDetectorFindsKnownRate(t *testing.T) {
 	}
 }
 
+// The refractory period, and only the refractory period, must reject the
+// dicrotic notch.
+//
+// The notch here is deliberately tall — 0.9 of the systolic peak — so that after
+// smoothing it still clears PeakFraction of the running peak estimate. An
+// earlier, shorter notch was rejected by the *amplitude* threshold instead, so
+// the test passed with the refractory condition replaced by a bare isPeak: it
+// named a guard it did not exercise. On this waveform the minimum gap the
+// refractory check actually has to reject is the notch's 100 ms lag.
 func TestDetectorRefractoryRejectsDoublePeaks(t *testing.T) {
 	const rate = 64.0
-	// A dicrotic notch: a second, smaller bump 100 ms after each beat, well
-	// inside the refractory period. Real PPG has one; counting it doubles the
-	// reported rate.
 	n := int(rate * 10)
 	samples := make([]float64, n)
 	ts := make([]float64, n)
 	for i := range samples {
 		e := float64(i) / rate
 		phase := math.Mod(e*1.2, 1) // 72 bpm
-		main := math.Exp(-(phase - 0.2) / 0.10 * ((phase - 0.2) / 0.10))
-		notch := 0.5 * math.Exp(-(phase-0.32)/0.06*((phase-0.32)/0.06))
+		main := math.Exp(-(phase - 0.2) / 0.06 * ((phase - 0.2) / 0.06))
+		notch := 0.9 * math.Exp(-(phase-0.32)/0.045*((phase-0.32)/0.045))
 		samples[i] = 100000 * (1 + 0.04*(main+notch))
 		ts[i] = 1000 + e
 	}
@@ -66,7 +72,7 @@ func TestDetectorRefractoryRejectsDoublePeaks(t *testing.T) {
 	d := NewDetector(rate)
 	beats, _ := d.Process(samples, ts)
 
-	// 10 s at 72 bpm is 12 beats. Counting notches would give ~24.
+	// 10 s at 72 bpm is 12 beats. Counting notches gives ~24.
 	if len(beats) > 14 {
 		t.Errorf("detected %d beats, want <=14: the notch is being counted", len(beats))
 	}

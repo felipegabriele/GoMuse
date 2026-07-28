@@ -151,6 +151,15 @@ func TestTrackerBreaksIntervalChainAcrossGap(t *testing.T) {
 	// MaxIntervalMs of the last beat before the gap — AddBeat's own range check
 	// would accept it. Break is therefore the only thing that can suppress it,
 	// which is what this test needs to actually exercise.
+	//
+	// That property is measured, not obvious, and it is not comfortable: the
+	// spanning interval is 1828 ms, only 172 ms under MaxIntervalMs. It is the
+	// 1 s hole plus however long the detector takes to find its first beat after
+	// resetSignalState, so anything that lengthens post-reset settling —
+	// SmoothTaps, PeakTauSec, PeakFraction — or that stops the reset happening
+	// at all (the hole must stay above SignalResetSec) pushes it past 2000 ms.
+	// The range check would then reject the interval on its own and this test
+	// would silently stop testing Break. If you change one of those, re-measure.
 	second, sts := pulseTrain(int(rate*20), rate, 72, 100000, 0.04)
 	for i := range sts {
 		sts[i] = ts[len(ts)-1] + 1.0 + float64(i)/rate

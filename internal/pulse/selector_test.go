@@ -46,6 +46,36 @@ func TestSelectorReportsNoneWhenAllFlat(t *testing.T) {
 	}
 }
 
+// dark builds a nearly-unlit channel: raw counts of 0 with one 2 every fifth
+// sample. Mean 0.4, p5 0, p95 2 — a modulation ratio of exactly 5, over a
+// hundred times what a real pulse channel scores, from a channel carrying
+// nothing at all.
+func dark(n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		if i%5 == 0 {
+			out[i] = 2
+		}
+	}
+	return out
+}
+
+// A small but nonzero mean is the case MinMean actually exists for, and the one
+// no accident covers: a ratio is scale-free, so a channel sitting in the bottom
+// few ADC counts wins the ranking outright. TestSelectorSkipsZeroFilledChannels
+// below cannot catch a missing guard, because 0/0 is NaN and NaN loses every >
+// comparison — exactly the accident MinMean's comment says must not be relied
+// upon.
+func TestSelectorSkipsNearZeroMeanChannels(t *testing.T) {
+	s := NewSelector(64, 2)
+	s.Observe([][]float64{dark(256), ramp(256, 100000, 0.04)})
+
+	if got := s.Channel(); got != 1 {
+		t.Errorf("Channel() = %d, want 1: a channel with a mean of 0.4 counts "+
+			"scores a modulation ratio of 5 and must be excluded before ranking", got)
+	}
+}
+
 // An Athena tag that does not carry a canonical channel zero-fills it. Dividing
 // by that channel's mean is 0/0; the guard must be explicit rather than relying
 // on NaN losing comparisons by accident.
