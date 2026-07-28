@@ -79,7 +79,7 @@
 
   // Latest derived pulse message. The browser computes none of this — see the
   // internal/pulse package.
-  var pulse = { state: 'no pulse', bpm: null, rmssd: null, channel: null, beats: [] };
+  var pulse = { state: 'no pulse', bpm: null, rmssd: null, ibiMs: null, channel: null, beats: [] };
   var backoff = 500;
   var framesThisSecond = 0;
   var rateStamp = 0;
@@ -97,6 +97,7 @@
     pulseReadout: document.querySelector('.pulse-readout'),
     pulseBpm: document.getElementById('pulseBpm'),
     pulseRmssd: document.getElementById('pulseRmssd'),
+    pulseIbi: document.getElementById('pulseIbi'),
     pulseState: document.getElementById('pulseState'),
     pulseChannel: document.getElementById('pulseChannel')
   };
@@ -377,12 +378,17 @@
     pulse.state = msg.state || 'no pulse';
     pulse.bpm = typeof msg.bpm === 'number' ? msg.bpm : null;
     pulse.rmssd = typeof msg.rmssd === 'number' ? msg.rmssd : null;
+    pulse.ibiMs = typeof msg.ibiMs === 'number' ? msg.ibiMs : null;
     pulse.channel = msg.channel || null;
     pulse.beats = msg.beats || [];
 
     if (el.pulseReadout) el.pulseReadout.dataset.state = pulse.state;
     if (el.pulseBpm) el.pulseBpm.textContent = pulse.bpm === null ? '—' : pulse.bpm.toFixed(0);
     if (el.pulseRmssd) el.pulseRmssd.textContent = pulse.rmssd === null ? '—' : pulse.rmssd.toFixed(0);
+    // The last inter-beat interval, the raw quantity bpm and RMSSD are both
+    // derived from. Shown to the millisecond because that is the resolution the
+    // variability being reported lives at.
+    if (el.pulseIbi) el.pulseIbi.textContent = pulse.ibiMs === null ? '—' : pulse.ibiMs.toFixed(0);
     if (el.pulseState) el.pulseState.textContent = pulse.state;
     if (el.pulseChannel) el.pulseChannel.textContent = pulse.channel || '';
 
@@ -468,12 +474,25 @@
   // in hello is hidden rather than left as an empty panel that looks broken.
   var OPTIONAL_STAGES = { ppg: 'stage-ppg', optics: 'stage-optics' };
 
+  // Stages derived from a stream rather than named by one. Pulse is shown when
+  // *either* pulse sensor is present, since it is computed from whichever one
+  // the device has. It belongs here and not in the per-stream build loop
+  // because only showStages sets hidden in both directions: revealed ad hoc, a
+  // pulse stage stayed visible after reconnecting to a device without one.
+  var DERIVED_STAGES = { 'stage-pulse': ['ppg', 'optics'] };
+
   function showStages(hello) {
     var present = {};
     hello.streams.forEach(function (m) { present[m.name] = true; });
     Object.keys(OPTIONAL_STAGES).forEach(function (name) {
       var stage = document.getElementById(OPTIONAL_STAGES[name]);
       if (stage) stage.hidden = !present[name];
+    });
+    Object.keys(DERIVED_STAGES).forEach(function (id) {
+      var stage = document.getElementById(id);
+      if (stage) {
+        stage.hidden = !DERIVED_STAGES[id].some(function (n) { return present[n]; });
+      }
     });
   }
 
@@ -502,10 +521,9 @@
         var panel = document.getElementById(PANELS[meta.name]);
         if (panel) buildPanel(stream, panel);
         if (meta.name === 'optics' || meta.name === 'ppg') {
+          // Visibility is showStages' job; this only builds the chart.
           var pp = document.getElementById('panel-pulse');
           if (pp) buildPulse(stream, pp);
-          var ps = document.getElementById('stage-pulse');
-          if (ps) ps.hidden = false;
         }
       }
     });
