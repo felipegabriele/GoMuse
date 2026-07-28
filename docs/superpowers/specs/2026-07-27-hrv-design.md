@@ -172,7 +172,8 @@ The browser draws the selected channel from the optics/PPG frames it already
 receives. The panel autoscales its y-axis, so the DC pedestal needs no special
 handling. Beat markers are overlaid from the server's `beats` timestamps.
 
-Readouts: bpm, RMSSD, selected channel name, and lock state.
+Readouts: bpm, RMSSD, the last inter-beat interval in ms, the selected channel
+name, and lock state.
 
 ## Error handling
 
