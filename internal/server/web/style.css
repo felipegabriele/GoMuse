@@ -410,24 +410,35 @@ main { padding: 8px 20px 32px; }
   * { transition-duration: 0.01ms !important; }
 }
 
-/* The pulse readout sits above its chart rather than in the legend rail: bpm
-   and RMSSD are the point of the panel, not a per-series annotation. */
-.pulse-readout {
+/* Heart rate is a compact status readout rather than another chart. Pushing it
+   with auto margin keeps it at the right edge of the display-control row. */
+.pulse-summary {
   display: flex;
   align-items: baseline;
-  flex-wrap: wrap;
-  gap: 18px;
-  padding: 4px 8px 10px;
+  align-self: center;
+  gap: 5px;
+  margin-left: auto;
+  color: var(--text-muted);
 }
-.pulse-stat { display: flex; align-items: baseline; gap: 5px; }
-.pulse-stat b {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 26px;
-  font-variant-numeric: tabular-nums;
+.pulse-summary[hidden] { display: none; }
+.pulse-heart {
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  fill: currentColor;
+}
+.pulse-summary output {
+  min-width: 2ch;
+  font-size: 22px;
+  font-weight: 700;
   line-height: 1;
+  text-align: right;
 }
-.pulse-stat em { font-style: normal; font-size: 12px; color: var(--text-muted); }
-.pulse-meta { font-size: 12px; color: var(--text-muted); }
-/* Anything but a lock is worth reading as provisional. */
-.pulse-readout[data-state="locked"] .pulse-stat b { color: var(--series-1); }
-.pulse-readout:not([data-state="locked"]) .pulse-stat b { color: var(--text-muted); }
+.pulse-unit {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Anything but a lock is provisional; a locked rate gets the heart color. */
+.pulse-summary[data-state="locked"] { color: var(--critical); }

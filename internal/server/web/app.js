@@ -77,9 +77,9 @@
   var streamsById = {};    // stream id -> stream object
   var ws = null;
 
-  // Latest derived pulse message. The browser computes none of this — see the
+  // Latest derived heart rate. The browser computes none of this — see the
   // internal/pulse package.
-  var pulse = { state: 'no pulse', bpm: null, rmssd: null, ibiMs: null, channel: null, beats: [] };
+  var pulse = { state: 'no pulse', bpm: null };
   var backoff = 500;
   var framesThisSecond = 0;
   var rateStamp = 0;
@@ -94,12 +94,8 @@
     filterLabel: document.getElementById('filterLabel'),
     eegChannels: document.getElementById('eegChannels'),
     eegRate: document.getElementById('eegRate'),
-    pulseReadout: document.querySelector('.pulse-readout'),
-    pulseBpm: document.getElementById('pulseBpm'),
-    pulseRmssd: document.getElementById('pulseRmssd'),
-    pulseIbi: document.getElementById('pulseIbi'),
-    pulseState: document.getElementById('pulseState'),
-    pulseChannel: document.getElementById('pulseChannel')
+    pulseSummary: document.getElementById('pulseSummary'),
+    pulseBpm: document.getElementById('pulseBpm')
   };
 
   // ---------------------------------------------------------- ring buffer
@@ -371,95 +367,14 @@
     stream.silent = stream.meta.channels.map(function () { return false; });
   }
 
-  // applyPulse stores the server's derived numbers and repaints the readout.
-  // A null bpm or rmssd means "not known yet", which is why the wire uses null
-  // rather than 0 — see PulseMessage in server.go.
+  // applyPulse stores the server's derived rate and repaints the compact
+  // control-row readout. Null means "not known yet", never zero bpm.
   function applyPulse(msg) {
     pulse.state = msg.state || 'no pulse';
     pulse.bpm = typeof msg.bpm === 'number' ? msg.bpm : null;
-    pulse.rmssd = typeof msg.rmssd === 'number' ? msg.rmssd : null;
-    pulse.ibiMs = typeof msg.ibiMs === 'number' ? msg.ibiMs : null;
-    pulse.channel = msg.channel || null;
-    pulse.beats = msg.beats || [];
 
-    if (el.pulseReadout) el.pulseReadout.dataset.state = pulse.state;
+    if (el.pulseSummary) el.pulseSummary.dataset.state = pulse.state;
     if (el.pulseBpm) el.pulseBpm.textContent = pulse.bpm === null ? '—' : pulse.bpm.toFixed(0);
-    if (el.pulseRmssd) el.pulseRmssd.textContent = pulse.rmssd === null ? '—' : pulse.rmssd.toFixed(0);
-    // The last inter-beat interval, the raw quantity bpm and RMSSD are both
-    // derived from. Shown to the millisecond because that is the resolution the
-    // variability being reported lives at.
-    if (el.pulseIbi) el.pulseIbi.textContent = pulse.ibiMs === null ? '—' : pulse.ibiMs.toFixed(0);
-    if (el.pulseState) el.pulseState.textContent = pulse.state;
-    if (el.pulseChannel) el.pulseChannel.textContent = pulse.channel || '';
-
-    var s = pulseStream();
-    if (s) s.dirty = true;
-  }
-
-  // pulseStream returns the stream the Pulse panel draws: optics on an Athena,
-  // PPG on a classic headband. They are alternatives; no device has both.
-  function pulseStream() {
-    for (var i = 0; i < streams.length; i++) {
-      if (streams[i].meta.name === 'optics' || streams[i].meta.name === 'ppg') return streams[i];
-    }
-    return null;
-  }
-
-  // buildPulse lays out the Pulse panel: one trace for the selected channel,
-  // plus a points-only series carrying the detected beats.
-  function buildPulse(stream, panel) {
-    var c = colors();
-    panel.textContent = '';
-
-    var plot = document.createElement('div');
-    plot.className = 'plot';
-    panel.appendChild(plot);
-
-    var u = new uPlot({
-      width: chartWidth(plot),
-      height: 168,
-      padding: [8, 10, 0, 0],
-      legend: { show: false },
-      cursor: { y: false, drag: { x: false, y: false, setScale: false } },
-      scales: { x: { time: false, auto: false }, y: { auto: true } },
-      axes: [xAxis(c, true), yAxis(c, 62)],
-      series: [
-        {},
-        { stroke: seriesColor(c, 0), width: 1.25, points: { show: false } },
-        // Beat markers. Drawn as points on a series that is NaN everywhere
-        // except at a detected beat, so uPlot spaces them for us instead of
-        // needing a custom draw hook.
-        {
-          stroke: seriesColor(c, 1),
-          width: 0,
-          points: { show: true, size: 7, fill: seriesColor(c, 1) }
-        }
-      ]
-    }, [new Float64Array(0), new Float64Array(0), new Float64Array(0)], plot);
-
-    stream.pulseChart = u;
-  }
-
-  // beatSeries maps beat timestamps onto the trace's x grid, returning a series
-  // that is NaN except at the sample nearest each beat. beats arrive from the
-  // server as absolute Unix seconds (same base as the frame header's t0), but
-  // xs is relative to state.epoch like every other trace, so callers must
-  // shift beats by the epoch before passing them in here.
-  function beatSeries(xs, len, ys, beats) {
-    var out = new Float64Array(len);
-    for (var i = 0; i < len; i++) out[i] = NaN;
-    if (!beats || !len) return out;
-
-    var j = 0;
-    for (var b = 0; b < beats.length; b++) {
-      var t = beats[b];
-      if (t < xs[0] || t > xs[len - 1]) continue;
-      while (j < len - 1 && xs[j + 1] <= t) j++;
-      // Snap to whichever neighbour is closer.
-      var k = (j + 1 < len && Math.abs(xs[j + 1] - t) < Math.abs(xs[j] - t)) ? j + 1 : j;
-      out[k] = ys[k];
-    }
-    return out;
   }
 
   var PANELS = {
@@ -474,13 +389,6 @@
   // in hello is hidden rather than left as an empty panel that looks broken.
   var OPTIONAL_STAGES = { ppg: 'stage-ppg', optics: 'stage-optics' };
 
-  // Stages derived from a stream rather than named by one. Pulse is shown when
-  // *either* pulse sensor is present, since it is computed from whichever one
-  // the device has. It belongs here and not in the per-stream build loop
-  // because only showStages sets hidden in both directions: revealed ad hoc, a
-  // pulse stage stayed visible after reconnecting to a device without one.
-  var DERIVED_STAGES = { 'stage-pulse': ['ppg', 'optics'] };
-
   function showStages(hello) {
     var present = {};
     hello.streams.forEach(function (m) { present[m.name] = true; });
@@ -488,12 +396,15 @@
       var stage = document.getElementById(OPTIONAL_STAGES[name]);
       if (stage) stage.hidden = !present[name];
     });
-    Object.keys(DERIVED_STAGES).forEach(function (id) {
-      var stage = document.getElementById(id);
-      if (stage) {
-        stage.hidden = !DERIVED_STAGES[id].some(function (n) { return present[n]; });
-      }
-    });
+    // Heart rate is available from either alternative pulse sensor. Reset the
+    // readout as well as visibility when reconnecting to a different device.
+    if (el.pulseSummary) {
+      el.pulseSummary.hidden = !present.ppg && !present.optics;
+      el.pulseSummary.dataset.state = 'no pulse';
+    }
+    pulse.state = 'no pulse';
+    pulse.bpm = null;
+    if (el.pulseBpm) el.pulseBpm.textContent = '—';
   }
 
   function build(hello) {
@@ -520,11 +431,6 @@
       } else if (PANELS[meta.name]) {
         var panel = document.getElementById(PANELS[meta.name]);
         if (panel) buildPanel(stream, panel);
-        if (meta.name === 'optics' || meta.name === 'ppg') {
-          // Visibility is showStages' job; this only builds the chart.
-          var pp = document.getElementById('panel-pulse');
-          if (pp) buildPulse(stream, pp);
-        }
       }
     });
 
@@ -549,11 +455,7 @@
         if (w !== u.width) u.setSize({ width: w, height: u.height });
       });
     });
-    streams.forEach(function (s) {
-      if (!s.pulseChart) return;
-      var w = chartWidth(s.pulseChart.root.parentNode);
-      if (w !== s.pulseChart.width) s.pulseChart.setSize({ width: w, height: s.pulseChart.height });
-    });
+
   }
 
   // ----------------------------------------------------------- draw loop
@@ -597,19 +499,6 @@
         s.charts[0].setScale('x', { min: xmin, max: xmax });
       }
 
-      if (s.pulseChart) {
-        var ci = 0;
-        if (pulse.channel) {
-          var at = s.meta.channels.indexOf(pulse.channel);
-          if (at >= 0) ci = at;
-        }
-        var ys = tr.y[ci].subarray(0, tr.len);
-        // Beats are absolute Unix seconds; xs is relative to state.epoch (see
-        // tracePush's caller), so shift before comparing.
-        var beats = state.epoch === null ? [] : pulse.beats.map(function (t) { return t - state.epoch; });
-        s.pulseChart.setData([xs, ys, beatSeries(xs, tr.len, ys, beats)], true);
-        s.pulseChart.setScale('x', { min: xmin, max: xmax });
-      }
     });
 
     if (now - rateStamp >= 1000) {
