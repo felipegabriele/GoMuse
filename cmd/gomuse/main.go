@@ -136,8 +136,27 @@ func (c *connFlags) start(ctx context.Context, h *hub.Hub) (*source, error) {
 	}
 
 	if c.demo {
-		fmt.Fprintln(os.Stderr, "running in demo mode with synthetic signals — no headband is being used")
 		src := synth.New(h, c.streams())
+		// synth builds a generator only for the streams in sample.All(), which
+		// deliberately omits Optics — there is no synthetic optics waveform.
+		// So -optics alone satisfies any() (it is a legitimate configuration
+		// for a real Athena, whose pulse sensor *is* the optics stream) while
+		// leaving the demo with nothing to publish: Source.Run would park on
+		// <-ctx.Done() and record would only admit "no data was recorded"
+		// after the duration elapsed — never, for an unbounded run — while
+		// stream served an empty viewer forever. Ask the source how many
+		// generators it actually built rather than re-listing IDs here, so
+		// this check cannot drift from what synth iterates.
+		if src.Streams() == 0 {
+			// Name the supported streams from the same list synth walks, for
+			// the same reason.
+			names := make([]string, 0, len(sample.All()))
+			for _, id := range sample.All() {
+				names = append(names, sample.MetaFor(id).Name)
+			}
+			return nil, fmt.Errorf("demo mode has no generator for any enabled stream (there is no synthetic optics signal); enable at least one of: %s", strings.Join(names, ", "))
+		}
+		fmt.Fprintln(os.Stderr, "running in demo mode with synthetic signals — no headband is being used")
 		return &source{
 			run:     src.Run,
 			stop:    func() {},
