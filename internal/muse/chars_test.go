@@ -48,6 +48,29 @@ func allStreams() Config {
 	}}
 }
 
+func TestWantsAnyUsesProtocolSpecificStreams(t *testing.T) {
+	opticsOnly := Config{Streams: map[sample.StreamID]bool{sample.Optics: true}}
+	if wantsAny(opticsOnly, sample.EEG, sample.PPG, sample.ACC, sample.Gyro) {
+		t.Error("optics-only config reports a stream supported by classic headbands")
+	}
+	if !wantsAny(opticsOnly, sample.EEG, sample.ACC, sample.Gyro, sample.Optics) {
+		t.Error("optics-only config reports no stream supported by Athena")
+	}
+
+	ppgOnly := Config{Streams: map[sample.StreamID]bool{sample.PPG: true}}
+	if !wantsAny(ppgOnly, sample.EEG, sample.PPG, sample.ACC, sample.Gyro) {
+		t.Error("PPG-only config reports no stream supported by classic headbands")
+	}
+	if wantsAny(ppgOnly, sample.EEG, sample.ACC, sample.Gyro, sample.Optics) {
+		t.Error("PPG-only config reports a stream supported by Athena")
+	}
+
+	// A nil map means all streams, as it does everywhere else in Config.
+	if !wantsAny(Config{}, sample.EEG) {
+		t.Error("nil Streams map did not enable the requested stream")
+	}
+}
+
 func TestMissingCharsClassicHeadbandHasEverything(t *testing.T) {
 	if got := missingChars(classic(), allStreams()); len(got) != 0 {
 		t.Fatalf("classic headband reported missing characteristics: %v", got)

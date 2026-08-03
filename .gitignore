@@ -19,3 +19,7 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# Subagent-driven-development scratch: ledgers, briefs, review packages.
+# Git history is the durable record; this directory is working state.
+/.superpowers/

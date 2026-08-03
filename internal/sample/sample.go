@@ -15,6 +15,12 @@ const (
 	PPG  StreamID = 1
 	ACC  StreamID = 2
 	Gyro StreamID = 3
+	// Optics is the Muse S Athena's 16-channel photoplethysmography stream.
+	// It is the Athena's equivalent of PPG rather than a second copy of it:
+	// that headband has no PPG characteristic, so no device produces both.
+	// Appended rather than slotted next to PPG because the numeric values are
+	// the WebSocket wire format.
+	Optics StreamID = 4
 )
 
 // Meta describes the fixed properties of a stream.
@@ -121,11 +127,12 @@ func Classic() *Set {
 //
 // Its EEG is 4 channels, not 5: the headband reports 8 channels on tag 0x12 but
 // only TP9/AF7/AF8/TP10 are electrode signals, matching what muse-lsl's
-// athena.py forwards. It has no PPG characteristic — the equivalent is a
-// 16-channel optics stream that gomuse decodes but does not yet publish.
+// athena.py forwards. It has no PPG characteristic — its pulse sensor is the
+// 16-channel Optics stream instead.
 //
 // SamplesPerPacket is the largest a packet carries (tag 0x11 packs 4 EEG
-// samples, 0x12 packs 2), since it is a sizing hint rather than a guarantee.
+// samples, 0x12 packs 2; optics tag 0x34 packs 3), since it is a sizing hint
+// rather than a guarantee.
 func Athena() *Set {
 	return NewSet(
 		Meta{
@@ -150,6 +157,26 @@ func Athena() *Set {
 			Channels:         []string{"X", "Y", "Z"},
 			Unit:             "dps",
 			Rate:             52,
+			SamplesPerPacket: 3,
+		},
+		Meta{
+			ID:   Optics,
+			Name: "optics",
+			// OPT0..OPT15 spelled out rather than generated, to keep this
+			// package import-free as documented above. Three tags feed this
+			// one canonical space (0x34 fills 4-7, 0x35 fills 0-7, 0x36 all
+			// 16), so which of these carry signal depends on the preset; the
+			// rest stay at zero. See muse.athenaOpticsIndex.
+			Channels: []string{
+				"OPT0", "OPT1", "OPT2", "OPT3",
+				"OPT4", "OPT5", "OPT6", "OPT7",
+				"OPT8", "OPT9", "OPT10", "OPT11",
+				"OPT12", "OPT13", "OPT14", "OPT15",
+			},
+			// Raw counts, as with classic PPG: muse-lsl labels the unit
+			// "a.u." and applies a scale of 1.0.
+			Unit:             "",
+			Rate:             64,
 			SamplesPerPacket: 3,
 		},
 	)

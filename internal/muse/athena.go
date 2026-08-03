@@ -20,6 +20,7 @@ package muse
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -91,6 +92,10 @@ var athenaSensors = map[byte]athenaSensor{
 	0x12: {"eeg", 8, 2, 256, 28, false},
 	0x34: {"optics", 4, 3, 64, 30, false},
 	0x35: {"optics", 8, 2, 64, 40, false},
+	// Measured on a MuseS-1FF3 at the p1041 default: optics arrives as 0x36
+	// only, one sample per packet across all 16 channels, at ~64.5 Hz. The
+	// narrower tags are kept because other presets are undocumented, not
+	// because they have been seen.
 	0x36: {"optics", 16, 1, 64, 40, false},
 	0x47: {"acc_gyro", 6, 3, 52, 36, false},
 	0x53: {"unknown", 2, 6, 32, 24, false},
@@ -267,9 +272,9 @@ func athenaOpticsIndex(tag byte, ch int) int {
 // decodeAthenaOptics decodes packed 20-bit LSB-first optics samples into the
 // canonical 16-channel space. Channels the tag does not carry stay zero.
 //
-// gomuse decodes optics so that the packet walk stays correct and the data is
-// there when a stream is added for it, but does not publish it yet: it has no
-// classic equivalent to map onto.
+// The output is always 16 channels wide regardless of how many the tag packs,
+// so that sample.Optics has one fixed shape and a preset change cannot alter
+// the channel count a viewer was already told about in its hello message.
 func decodeAthenaOptics(data []byte, tag byte, nchan, nsamp int) [][]float64 {
 	out := make([][]float64, AthenaOpticsChannels)
 	for ch := range out {
@@ -305,16 +310,21 @@ type athenaStreamer struct {
 	now     func() float64
 	streams map[sample.StreamID]bool
 
-	mu         sync.Mutex
-	dejitters  map[sample.StreamID]*Dejitter
+	mu        sync.Mutex
+	dejitters map[sample.StreamID]*Dejitter
+	// batteryPct is only meaningful once batteryOK is set: a headband that has
+	// not yet sent a battery block and one reporting a flat cell must not read
+	// the same, and tag 0x88 arrives only every five seconds.
 	batteryPct float64
+	batteryOK  bool
 }
 
 func newAthenaStreamer(cfg Config, publish func(sample.Chunk), touch func(), now func() float64) *athenaStreamer {
 	enabled := map[sample.StreamID]bool{
-		sample.EEG:  cfg.wants(sample.EEG),
-		sample.ACC:  cfg.wants(sample.ACC),
-		sample.Gyro: cfg.wants(sample.Gyro),
+		sample.EEG:    cfg.wants(sample.EEG),
+		sample.ACC:    cfg.wants(sample.ACC),
+		sample.Gyro:   cfg.wants(sample.Gyro),
+		sample.Optics: cfg.wants(sample.Optics),
 	}
 	return &athenaStreamer{
 		publish:   publish,
@@ -336,11 +346,12 @@ func (a *athenaStreamer) timestamps(id sample.StreamID, rate float64, n int, arr
 	return d.NextArrival(n, arrival)
 }
 
-// battery returns the last reported battery percentage.
-func (a *athenaStreamer) battery() float64 {
+// battery returns the last reported battery percentage, and whether one has
+// been reported at all.
+func (a *athenaStreamer) battery() (float64, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.batteryPct
+	return a.batteryPct, a.batteryOK
 }
 
 // handleControl receives the headband's replies to control commands. They are
@@ -377,7 +388,7 @@ func (a *athenaStreamer) handleBlock(b athenaBlock, arrival float64) {
 	switch s.kind {
 	case "battery":
 		if pct, ok := decodeAthenaBattery(b.payload); ok {
-			a.batteryPct = pct
+			a.batteryPct, a.batteryOK = pct, true
 		}
 
 	case "eeg":
@@ -409,16 +420,25 @@ func (a *athenaStreamer) handleBlock(b athenaBlock, arrival float64) {
 		}
 
 	case "optics":
-		// Decoded for completeness but not published: gomuse has no optics
-		// stream yet. Decoding it here keeps the cost honest and the code
-		// exercised.
-		_ = decodeAthenaOptics(b.payload, b.tag, s.channels, s.samples)
+		if !a.streams[sample.Optics] {
+			return
+		}
+		// All three optics tags decode into the same canonical 16-channel
+		// space, so the published chunk is the same width whichever tag
+		// arrived; channels this tag does not carry stay zero.
+		data := decodeAthenaOptics(b.payload, b.tag, s.channels, s.samples)
+		ts := a.timestamps(sample.Optics, s.rate, s.samples, arrival)
+		a.publish(sample.Chunk{Stream: sample.Optics, Timestamps: ts, Data: data})
 	}
 }
 
 // setupAthena wires up an Athena headband: subscribe to both data
 // characteristics, run the init sequence, then start streaming.
 func (c *Client) setupAthena(chars map[string]bluetooth.DeviceCharacteristic, cfg Config) error {
+	if !wantsAny(cfg, sample.EEG, sample.ACC, sample.Gyro, sample.Optics) {
+		return errors.New("muse: none of the enabled streams are supported by this Athena headband (enable at least one of: eeg, acc, gyro, optics)")
+	}
+
 	ctrl, ok := chars[CharControl]
 	if !ok {
 		return errNoControl
@@ -426,11 +446,16 @@ func (c *Client) setupAthena(chars map[string]bluetooth.DeviceCharacteristic, cf
 	c.control = ctrl
 	c.streams = sample.Athena()
 
+	// This headband has no PPG characteristic; optics is its pulse sensor. Say
+	// so rather than silently dropping a stream the user asked for by name —
+	// but only when they asked explicitly, since PPG is on by default and
+	// nagging every Athena run would be noise.
 	if cfg.wants(sample.PPG) && cfg.Streams != nil {
-		// Not an error: PPG is on by default, and refusing to run because a
-		// default is unavailable would be unhelpful. The optics stream is this
-		// headband's equivalent and is not published yet.
-		c.warn("this headband has no PPG; its optics stream is not supported yet")
+		if cfg.wants(sample.Optics) {
+			c.warn("this headband has no PPG; streaming its 16-channel optics instead")
+		} else {
+			c.warn("this headband has no PPG; its pulse sensor is optics, which -optics=false disabled")
+		}
 	}
 
 	streamer := newAthenaStreamer(cfg, c.publish, c.touch, nowSeconds)

@@ -15,10 +15,22 @@
     <span class="tagline">live headband stream</span>
   </div>
 
-  <div class="link" id="link" data-state="connecting">
-    <span class="link-dot" aria-hidden="true"></span>
-    <span class="link-text" id="linkText">Connecting</span>
-    <span class="link-rate mono" id="linkRate"></span>
+  <div class="status">
+    <!-- Hidden until the server's hello says this headband reports a battery
+         at all. A level it has not sent yet shows as an empty cell and a dash,
+         never as a fill: see applyBattery in app.js. -->
+    <div class="battery" id="battery" data-level="unknown" hidden aria-label="Headband battery">
+      <span class="battery-cell" aria-hidden="true">
+        <span class="battery-fill" id="batteryFill"></span>
+      </span>
+      <output class="battery-pct mono" id="batteryPct">—</output>
+    </div>
+
+    <div class="link" id="link" data-state="connecting">
+      <span class="link-dot" aria-hidden="true"></span>
+      <span class="link-text" id="linkText">Connecting</span>
+      <span class="link-rate mono" id="linkRate"></span>
+    </div>
   </div>
 </header>
 
@@ -58,6 +70,14 @@
       </button>
     </div>
   </div>
+
+  <div class="pulse-summary" id="pulseSummary" data-state="no pulse" hidden aria-label="Heart rate">
+    <svg class="pulse-heart" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 21s-7.5-4.6-9.6-9C.6 8.2 2.8 4 7.1 4c2.1 0 3.8 1.2 4.9 2.8C13.1 5.2 14.8 4 16.9 4c4.3 0 6.5 4.2 4.7 8-2.1 4.4-9.6 9-9.6 9z"/>
+    </svg>
+    <output class="mono" id="pulseBpm">—</output>
+    <span class="pulse-unit">bpm</span>
+  </div>
 </div>
 
 <main>
@@ -65,16 +85,24 @@
     <div class="stage-head">
       <h2 id="eegHeading">EEG</h2>
       <p class="stage-note">
-        Five electrodes at <span class="mono" id="eegRate">256</span> Hz.
+        Four electrodes at <span class="mono" id="eegRate">256</span> Hz.
         σ is the standard deviation over the visible window.
       </p>
     </div>
     <div class="tape" id="eegChannels" aria-live="off"></div>
   </section>
 
-  <details class="stage collapsible" id="stage-ppg">
+  <!-- PPG and optics are the classic and Athena pulse sensors respectively.
+       No headband has both, so app.js hides whichever did not appear in the
+       server's hello message. -->
+  <details class="stage collapsible" id="stage-ppg" hidden>
     <summary><h2>PPG</h2><span class="stage-note">Pulse, raw counts</span></summary>
     <div class="panel" id="panel-ppg"></div>
+  </details>
+
+  <details class="stage collapsible" id="stage-optics" hidden>
+    <summary><h2>Optics</h2><span class="stage-note">Pulse, 16 channels, raw counts</span></summary>
+    <div class="panel" id="panel-optics"></div>
   </details>
 
   <details class="stage collapsible" id="stage-acc">

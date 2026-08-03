@@ -70,12 +70,17 @@
     scale: 100,     // EEG half-height, in the stream's unit
     filter: false,
     epoch: null,    // Unix seconds of the first sample of the session
+    battery: false, // whether hello advertised a battery provider
     built: false
   };
 
   var streams = [];        // in server order, index by array position
   var streamsById = {};    // stream id -> stream object
   var ws = null;
+
+  // Latest derived heart rate. The browser computes none of this — see the
+  // internal/pulse package.
+  var pulse = { state: 'no pulse', bpm: null };
   var backoff = 500;
   var framesThisSecond = 0;
   var rateStamp = 0;
@@ -89,7 +94,12 @@
     filterToggle: document.getElementById('filterToggle'),
     filterLabel: document.getElementById('filterLabel'),
     eegChannels: document.getElementById('eegChannels'),
-    eegRate: document.getElementById('eegRate')
+    eegRate: document.getElementById('eegRate'),
+    pulseSummary: document.getElementById('pulseSummary'),
+    pulseBpm: document.getElementById('pulseBpm'),
+    battery: document.getElementById('battery'),
+    batteryFill: document.getElementById('batteryFill'),
+    batteryPct: document.getElementById('batteryPct')
   };
 
   // ---------------------------------------------------------- ring buffer
@@ -171,7 +181,18 @@
     };
   }
 
-  function seriesColor(c, i) { return c.series[i % c.series.length]; }
+  // n is the stream's channel count. A wide stream outruns the three-colour
+  // palette — Athena optics is 16 channels, which would give five of them the
+  // same stroke — so those get evenly spaced hues instead, keeping every trace
+  // in the panel distinguishable. Narrow streams keep the designed palette.
+  function seriesColor(c, i, n) {
+    if (!n || n <= c.series.length) return c.series[i % c.series.length];
+    return 'hsl(' + Math.round((360 / n) * i) + ', 70%, 58%)';
+  }
+
+  // WIDE_STREAM is the channel count above which a panel switches to generated
+  // hues and hides its silent channels. Only optics reaches it today.
+  var WIDE_STREAM = 8;
 
   // --------------------------------------------------------------- charts
 
@@ -310,11 +331,12 @@
     stats.className = 'panel-stats';
     panel.appendChild(stats);
 
+    var nchan = stream.meta.channels.length;
     var series = [{}];
     stream.meta.channels.forEach(function (name, i) {
       series.push({
         label: name,
-        stroke: seriesColor(c, i),
+        stroke: seriesColor(c, i, nchan),
         width: 1.25,
         points: { show: false }
       });
@@ -339,18 +361,97 @@
       var span = document.createElement('span');
       span.className = 'stat';
       span.innerHTML = '<i></i><b></b><em class="mono">σ —</em>';
-      span.querySelector('i').style.background = seriesColor(c, i);
+      span.querySelector('i').style.background = seriesColor(c, i, nchan);
       span.querySelector('b').textContent = name;
       stats.appendChild(span);
-      return { sigma: span.querySelector('em'), node: plot };
+      return { sigma: span.querySelector('em'), node: plot, chip: span };
     });
+    // Tracks which channels are currently hidden as silent, so the series are
+    // only toggled when that changes rather than on every stats pass.
+    stream.silent = stream.meta.channels.map(function () { return false; });
   }
 
-  var PANELS = { ppg: 'panel-ppg', acc: 'panel-acc', gyro: 'panel-gyro' };
+  // applyPulse stores the server's derived rate and repaints the compact
+  // control-row readout. Null means "not known yet", never zero bpm.
+  function applyPulse(msg) {
+    pulse.state = msg.state || 'no pulse';
+    pulse.bpm = typeof msg.bpm === 'number' ? msg.bpm : null;
+
+    if (el.pulseSummary) el.pulseSummary.dataset.state = pulse.state;
+    if (el.pulseBpm) el.pulseBpm.textContent = pulse.bpm === null ? '—' : pulse.bpm.toFixed(0);
+  }
+
+  // Battery level bands, in percent. Below LOW the cell turns amber, below
+  // CRITICAL the whole indicator turns red — a headband that dies mid-session
+  // takes the recording with it, so the warning is worth being loud.
+  var BATTERY_LOW = 30;
+  var BATTERY_CRITICAL = 10;
+
+  // applyBattery paints the header indicator. A null percent means the headband
+  // has not reported a level yet, which shows as an empty cell and a dash: an
+  // unknown battery and a flat one must not look the same.
+  function applyBattery(msg) {
+    var pct = msg && typeof msg.percent === 'number' ? msg.percent : null;
+    if (!el.battery) return;
+
+    if (pct === null) {
+      el.battery.dataset.level = 'unknown';
+      if (el.batteryFill) el.batteryFill.style.width = '0%';
+      if (el.batteryPct) el.batteryPct.textContent = '—';
+      return;
+    }
+
+    // The number is shown as the server sent it, but the bar is clamped: a
+    // level outside 0..100 means the decode is wrong, and a fill that overflows
+    // its cell would misreport that as a full battery.
+    var clamped = Math.max(0, Math.min(100, pct));
+    el.battery.dataset.level =
+      pct <= BATTERY_CRITICAL ? 'critical' : pct <= BATTERY_LOW ? 'low' : 'ok';
+    if (el.batteryFill) el.batteryFill.style.width = clamped + '%';
+    if (el.batteryPct) el.batteryPct.textContent = Math.round(pct) + '%';
+  }
+
+  var PANELS = {
+    ppg: 'panel-ppg',
+    optics: 'panel-optics',
+    acc: 'panel-acc',
+    gyro: 'panel-gyro'
+  };
+
+  // Stages a headband may not have. PPG and optics are alternatives — a classic
+  // Muse sends the first, an Athena the second — so the one that did not appear
+  // in hello is hidden rather than left as an empty panel that looks broken.
+  var OPTIONAL_STAGES = { ppg: 'stage-ppg', optics: 'stage-optics' };
+
+  function showStages(hello) {
+    var present = {};
+    hello.streams.forEach(function (m) { present[m.name] = true; });
+    Object.keys(OPTIONAL_STAGES).forEach(function (name) {
+      var stage = document.getElementById(OPTIONAL_STAGES[name]);
+      if (stage) stage.hidden = !present[name];
+    });
+    // Heart rate is available from either alternative pulse sensor. Reset the
+    // readout as well as visibility when reconnecting to a different device.
+    if (el.pulseSummary) {
+      el.pulseSummary.hidden = !present.ppg && !present.optics;
+      el.pulseSummary.dataset.state = 'no pulse';
+    }
+    pulse.state = 'no pulse';
+    pulse.bpm = null;
+    if (el.pulseBpm) el.pulseBpm.textContent = '—';
+
+    // Only sources that report a level get the indicator at all. Reset it as
+    // well as its visibility, so reconnecting does not leave the previous
+    // device's charge on screen while the new one is still silent.
+    if (el.battery) el.battery.hidden = !hello.battery;
+    applyBattery(null);
+  }
 
   function build(hello) {
     streams = [];
     streamsById = {};
+    state.battery = !!hello.battery;
+    showStages(hello);
 
     hello.streams.forEach(function (meta) {
       var target = Math.ceil(state.window * meta.rate);
@@ -381,7 +482,13 @@
   function rebuild() {
     if (!state.built) return;
     var saved = streams.map(function (s) { return s.trace; });
-    build({ streams: streams.map(function (s) { return s.meta; }) });
+    // build also resets optional capabilities from hello. Carry battery
+    // availability through a theme rebuild, or the indicator would disappear
+    // permanently the first time the system colour scheme changes.
+    build({
+      streams: streams.map(function (s) { return s.meta; }),
+      battery: state.battery
+    });
     streams.forEach(function (s, i) {
       if (saved[i] && saved[i].nchan === s.trace.nchan) s.trace = traceResize(saved[i], s.trace.target);
     });
@@ -395,6 +502,7 @@
         if (w !== u.width) u.setSize({ width: w, height: u.height });
       });
     });
+
   }
 
   // ----------------------------------------------------------- draw loop
@@ -437,6 +545,7 @@
         s.charts[0].setData(data, true);
         s.charts[0].setScale('x', { min: xmin, max: xmax });
       }
+
     });
 
     if (now - rateStamp >= 1000) {
@@ -469,6 +578,21 @@
       var out = s.readouts[c];
       if (!out) continue;
       out.sigma.textContent = 'σ ' + formatValue(sd, displayUnit(s.meta.unit));
+
+      // On a wide stream, a channel the device is not filling reads as exactly
+      // zero rather than as noise — Athena optics decodes all 16 canonical
+      // channels but a given preset only carries 4 or 8 of them. Hide those,
+      // so the panel shows the live channels instead of a flat line at zero
+      // dragging the shared y-scale down. Restricted to wide streams because
+      // on a 3-axis IMU an exact zero is more likely to be real.
+      if (tr.nchan > WIDE_STREAM && s.silent) {
+        var silent = sd === 0 && s.center[c] === 0;
+        if (silent !== s.silent[c]) {
+          s.silent[c] = silent;
+          if (s.charts[0]) s.charts[0].setSeries(c + 1, { show: !silent });
+          if (out.chip) out.chip.dataset.silent = silent ? 'true' : 'false';
+        }
+      }
 
       if (out.quality) {
         var level = sd < 20 ? 'good' : (sd < 60 ? 'warning' : 'critical');
@@ -586,6 +710,8 @@
         var msg;
         try { msg = JSON.parse(e.data); } catch (err) { return; }
         if (msg && msg.type === 'hello' && !state.built) build(msg);
+        else if (msg && msg.type === 'pulse') applyPulse(msg);
+        else if (msg && msg.type === 'battery') applyBattery(msg);
         return;
       }
       var frame = decodeFrame(e.data);

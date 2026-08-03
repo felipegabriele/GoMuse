@@ -77,7 +77,7 @@ type connFlags struct {
 	scanTimeout  time.Duration
 	demo         bool
 
-	eeg, ppg, acc, gyro bool
+	eeg, ppg, acc, gyro, optics bool
 }
 
 func (c *connFlags) register(fs *flag.FlagSet) {
@@ -89,39 +89,80 @@ func (c *connFlags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.demo, "demo", false, "generate synthetic signals instead of connecting to a headband")
 
 	fs.BoolVar(&c.eeg, "eeg", true, "stream EEG")
-	fs.BoolVar(&c.ppg, "ppg", true, "stream PPG")
+	fs.BoolVar(&c.ppg, "ppg", true, "stream PPG (classic headbands; the Athena's equivalent is -optics)")
 	fs.BoolVar(&c.acc, "acc", true, "stream accelerometer")
 	fs.BoolVar(&c.gyro, "gyro", true, "stream gyroscope")
+	fs.BoolVar(&c.optics, "optics", true, "stream 16-channel optics (Muse S Athena only)")
 }
 
 func (c *connFlags) streams() map[sample.StreamID]bool {
+	// Every stream any supported headband produces must appear here, including
+	// those a given device lacks: muse.Config.wants reads this map directly, so
+	// an omitted key reads as "disabled" rather than "not applicable".
 	return map[sample.StreamID]bool{
-		sample.EEG:  c.eeg,
-		sample.PPG:  c.ppg,
-		sample.ACC:  c.acc,
-		sample.Gyro: c.gyro,
+		sample.EEG:    c.eeg,
+		sample.PPG:    c.ppg,
+		sample.ACC:    c.acc,
+		sample.Gyro:   c.gyro,
+		sample.Optics: c.optics,
 	}
 }
 
-func (c *connFlags) any() bool { return c.eeg || c.ppg || c.acc || c.gyro }
+func (c *connFlags) any() bool { return c.eeg || c.ppg || c.acc || c.gyro || c.optics }
 
-// source starts either a real headband or the synthetic generator, and returns
-// a function that runs it until the context is cancelled, along with the stream
-// set the source produces.
+// source is a started data source: everything the rest of the program needs
+// from either a real headband or the synthetic generator.
 //
-// The stream set comes from the source rather than from a constant because it
-// is a property of the hardware: a Muse S Athena has 4 EEG channels and no PPG,
-// a classic headband 5 and 3. The viewer and the recorder are both built from
+// streams comes from the source rather than from a constant because it is a
+// property of the hardware: a Muse S Athena has 4 EEG channels and no PPG, a
+// classic headband 5 and 3. The viewer and the recorder are both built from
 // whatever comes back here.
-func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Context) error, stop func(), streams *sample.Set, err error) {
+type source struct {
+	// run publishes until the context is cancelled.
+	run func(context.Context) error
+	// stop releases the source. Always non-nil, so callers can defer it.
+	stop func()
+	// streams describes what this source produces.
+	streams *sample.Set
+	// battery reports the charge level and whether it is known yet. Never nil
+	// here, but the server treats nil as "this source has no battery".
+	battery func() (float64, bool)
+}
+
+// start brings up either a real headband or the synthetic generator.
+func (c *connFlags) start(ctx context.Context, h *hub.Hub) (*source, error) {
 	if !c.any() {
-		return nil, nil, nil, errors.New("all streams disabled; nothing to do")
+		return nil, errors.New("all streams disabled; nothing to do")
 	}
 
 	if c.demo {
-		fmt.Fprintln(os.Stderr, "running in demo mode with synthetic signals — no headband is being used")
 		src := synth.New(h, c.streams())
-		return src.Run, func() {}, sample.Classic(), nil
+		// synth builds a generator only for the streams in sample.All(), which
+		// deliberately omits Optics — there is no synthetic optics waveform.
+		// So -optics alone satisfies any() (it is a legitimate configuration
+		// for a real Athena, whose pulse sensor *is* the optics stream) while
+		// leaving the demo with nothing to publish: Source.Run would park on
+		// <-ctx.Done() and record would only admit "no data was recorded"
+		// after the duration elapsed — never, for an unbounded run — while
+		// stream served an empty viewer forever. Ask the source how many
+		// generators it actually built rather than re-listing IDs here, so
+		// this check cannot drift from what synth iterates.
+		if src.Streams() == 0 {
+			// Name the supported streams from the same list synth walks, for
+			// the same reason.
+			names := make([]string, 0, len(sample.All()))
+			for _, id := range sample.All() {
+				names = append(names, sample.MetaFor(id).Name)
+			}
+			return nil, fmt.Errorf("demo mode has no generator for any enabled stream (there is no synthetic optics signal); enable at least one of: %s", strings.Join(names, ", "))
+		}
+		fmt.Fprintln(os.Stderr, "running in demo mode with synthetic signals — no headband is being used")
+		return &source{
+			run:     src.Run,
+			stop:    func() {},
+			streams: sample.Classic(),
+			battery: src.Battery,
+		}, nil
 	}
 
 	cfg := muse.Config{
@@ -139,10 +180,15 @@ func (c *connFlags) source(ctx context.Context, h *hub.Hub) (run func(context.Co
 	}
 	client, err := muse.Connect(ctx, cfg, h.Publish)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	fmt.Fprintln(os.Stderr, "connected; streaming")
-	return client.Run, func() { _ = client.Close() }, client.Streams(), nil
+	return &source{
+		run:     client.Run,
+		stop:    func() { _ = client.Close() },
+		streams: client.Streams(),
+		battery: client.Battery,
+	}, nil
 }
 
 func runList(ctx context.Context, args []string) error {
@@ -179,11 +225,12 @@ func runStream(ctx context.Context, args []string) error {
 	h := hub.New()
 	defer h.Close()
 
-	run, stopSource, streams, err := cf.source(ctx, h)
+	src, err := cf.start(ctx, h)
 	if err != nil {
 		return err
 	}
-	defer stopSource()
+	defer src.stop()
+	streams := src.streams
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -199,14 +246,19 @@ func runStream(ctx context.Context, args []string) error {
 		go func() { errs <- rec.Run(ctx, h) }()
 	}
 
-	srv := server.New(server.Config{Addr: fmt.Sprintf(":%d", *port), Hub: h, Streams: streams})
+	srv := server.New(server.Config{
+		Addr:    fmt.Sprintf(":%d", *port),
+		Hub:     h,
+		Streams: streams,
+		Battery: src.battery,
+	})
 	go func() { errs <- srv.ListenAndServe(ctx) }()
 
 	fmt.Fprintf(os.Stderr, "viewer at http://localhost:%d — Ctrl-C to stop\n", *port)
 
 	// The source finishing (auto-disconnect, or the headband going away) ends
 	// the run, so give it the same treatment as a server error.
-	go func() { errs <- run(ctx) }()
+	go func() { errs <- src.run(ctx) }()
 
 	err = <-errs
 	cancel()
@@ -232,11 +284,11 @@ func runRecord(ctx context.Context, args []string) error {
 	h := hub.New()
 	defer h.Close()
 
-	run, stopSource, streams, err := cf.source(ctx, h)
+	src, err := cf.start(ctx, h)
 	if err != nil {
 		return err
 	}
-	defer stopSource()
+	defer src.stop()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -245,19 +297,19 @@ func runRecord(ctx context.Context, args []string) error {
 		defer cancel()
 	}
 
-	rec, err := record.New(record.Config{Dir: *dir, Streams: cf.streams(), Meta: streams})
+	rec, err := record.New(record.Config{Dir: *dir, Streams: cf.streams(), Meta: src.streams})
 	if err != nil {
 		return err
 	}
 
 	errs := make(chan error, 2)
-	go func() { errs <- run(ctx) }()
+	go func() { errs <- src.run(ctx) }()
 
 	// Run returns when the context is cancelled, having flushed and closed.
 	recErr := rec.Run(ctx, h)
 	cancel()
 
-	reportRecording(rec, streams)
+	reportRecording(rec, src.streams)
 
 	if recErr != nil && !errors.Is(recErr, context.Canceled) {
 		return recErr

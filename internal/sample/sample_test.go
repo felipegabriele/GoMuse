@@ -31,9 +31,21 @@ func TestAthenaSetShape(t *testing.T) {
 	if got := s.MetaFor(EEG).Rate; got != 256 {
 		t.Errorf("Athena EEG rate = %v, want 256", got)
 	}
-	// No PPG characteristic exists on an Athena; optics is not published yet.
+	// No PPG characteristic exists on an Athena; Optics is its pulse sensor.
 	if s.Has(PPG) {
 		t.Error("Athena set contains PPG, which the headband does not have")
+	}
+	if !s.Has(Optics) {
+		t.Fatal("Athena set is missing Optics, the headband's pulse sensor")
+	}
+	// Sixteen canonical channels whichever tag arrives: tags 0x34/0x35/0x36
+	// carry 4, 8 or 16 into this one space, and the viewer is told the width
+	// once in its hello message.
+	if got := s.MetaFor(Optics).NumChannels(); got != 16 {
+		t.Errorf("Athena optics channels = %d, want 16", got)
+	}
+	if got := s.MetaFor(Optics).Rate; got != 64 {
+		t.Errorf("Athena optics rate = %v, want 64", got)
 	}
 	for _, id := range []StreamID{ACC, Gyro} {
 		if !s.Has(id) {
@@ -42,6 +54,14 @@ func TestAthenaSetShape(t *testing.T) {
 		if got := s.MetaFor(id).NumChannels(); got != 3 {
 			t.Errorf("Athena stream %d channels = %d, want 3", id, got)
 		}
+	}
+}
+
+func TestClassicSetHasNoOptics(t *testing.T) {
+	// Optics and PPG are alternatives, not additions: publishing both would
+	// tell a viewer to draw a pulse panel the headband cannot fill.
+	if Classic().Has(Optics) {
+		t.Error("Classic set contains Optics, which only the Athena produces")
 	}
 }
 

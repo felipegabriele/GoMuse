@@ -1,23 +1,20 @@
 # gomuse
 
-`gomuse` streams EEG, PPG, accelerometer, and gyroscope data from a Muse
+`gomuse` streams EEG, pulse (PPG or optics), accelerometer, and gyroscope data from a Muse
 brain-sensing headband over Bluetooth Low Energy. It includes a live browser
 viewer and can write each sensor stream directly to CSV, with no Python
 environment, Lab Streaming Layer, or external web assets required.
-
-The project is a Go port of the device and viewer layers of
-[muse-lsl](https://github.com/alexandrebarachant/muse-lsl). It keeps
-muse-lsl's decoding, timestamp correction, and EEG bandpass behavior while
-replacing the matplotlib viewer with a self-contained web application.
 
 ![gomuse live dashboard](img/gomuse-dashboard.png)
 
 ## Features
 
-- Streams EEG, PPG, accelerometer, and gyroscope data over BLE
+- Streams EEG, pulse (PPG or optics), accelerometer, and gyroscope data over BLE
 - Supports classic Muse 2 and Muse S devices, plus Muse S Athena (Gen 3)
 - Serves a responsive live viewer from a single compiled binary
 - Provides an optional 1–40 Hz EEG display filter
+- Derives live heart rate and RMSSD heart-rate variability from the pulse stream
+- Shows the headband's remaining battery percentage in the viewer
 - Records one timestamped CSV file per sensor stream
 - Includes a synthetic signal mode for trying the viewer without a headband
 - Embeds all browser assets and requires no internet access at runtime
@@ -93,10 +90,15 @@ MAC address and is not portable to another computer.
 
 ### Supported data
 
-| Device family | EEG | PPG | Accelerometer | Gyroscope |
+| Device family | EEG | Pulse | Accelerometer | Gyroscope |
 | --- | --- | --- | --- | --- |
-| Muse 2 / classic Muse S | 5 channels at 256 Hz | 3 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
-| Muse S Athena (Gen 3) | 4 channels at 256 Hz | Not published | 3 axes at 52 Hz | 3 axes at 52 Hz |
+| Muse 2 / classic Muse S | 5 channels at 256 Hz | PPG, 3 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
+| Muse S Athena (Gen 3) | 4 channels at 256 Hz | Optics, 16 channels at 64 Hz | 3 axes at 52 Hz | 3 axes at 52 Hz |
+
+The two pulse streams are alternatives rather than additions: the Athena has no
+PPG characteristic, and optics is its equivalent. How many of the 16 optics
+channels carry signal depends on the preset — the headband sends 4, 8 or 16 of
+them into the same canonical channel space, and the rest read zero.
 
 Device generation is detected automatically from its BLE characteristics. If
 a device does not expose a requested stream, `gomuse` reports what is missing
@@ -160,7 +162,8 @@ Common `stream` and `record` options:
 | `-disable-light` | off | Turn off the Muse S indicator light |
 | `-demo` | off | Generate synthetic signals instead of using BLE |
 | `-eeg=false` | enabled | Disable EEG |
-| `-ppg=false` | enabled | Disable PPG |
+| `-ppg=false` | enabled | Disable PPG (classic headbands) |
+| `-optics=false` | enabled | Disable optics (Muse S Athena) |
 | `-acc=false` | enabled | Disable accelerometer data |
 | `-gyro=false` | enabled | Disable gyroscope data |
 
@@ -177,7 +180,7 @@ gomuse stream -h
 ## Viewer controls
 
 The browser viewer shows one trace per EEG electrode, with collapsible panels
-for PPG and motion data. You can change the visible time window, adjust EEG
+for pulse and motion data. You can change the visible time window, adjust EEG
 amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard:
 
 | Key | Action |
@@ -187,6 +190,34 @@ amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard
 | `+` | Lengthen the time window |
 | `-` | Shorten the time window |
 | `d` | Toggle the EEG display filter |
+
+A heart-rate readout sits at the end of the display-control row whenever the
+headband has a pulse sensor — PPG on a classic Muse, optics on an Athena. The
+server picks whichever channel currently carries the strongest pulse, detects
+beats on it, and pushes the derived rate to the viewer; the browser computes
+none of it.
+
+The readout shows a bpm figure only once the rate is locked, and a dash
+otherwise, so it never displays a fabricated number. Two different situations
+show that dash: no channel carries enough modulation — usually the headband is
+not on properly — or one does, but too few clean beats have accumulated yet. A
+locked rate is highlighted, so a provisional one still reads as provisional.
+Expect a few seconds to reach a lock, and the same again after moving the
+headband.
+
+The WebSocket `pulse` message carries more than the viewer draws: RMSSD
+heart-rate variability over the last 60 s (reported only after about 30 s of
+beats, because it is not meaningful over less), the most recent beat-to-beat
+interval, the selected channel name, and the beat timestamps themselves.
+
+A battery indicator sits in the header, next to the connection light. Both
+headband generations report their charge — an Athena in a tagged sensor block,
+a classic Muse in its telemetry packet — and both send the first one only after
+the stream has been running for several seconds. Until then the cell is drawn
+empty with a dash beside it rather than filled in with a guess. The indicator
+turns amber below 30% and red below 10%, since a headband that dies mid-session
+takes the recording with it. Demo mode drains a synthetic battery far faster
+than a real cell, so the readout can be watched moving without a headband.
 
 The server also exposes `GET /healthz`, which reports its status, connected
 viewer count, and dropped display chunks as JSON.
