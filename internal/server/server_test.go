@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -623,7 +624,7 @@ func TestAthenaEEGChunkSurvivesTheRoundTrip(t *testing.T) {
 
 func TestPulseMessageShapeWhenLocked(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 
 	m := set.MetaFor(sample.Optics)
 	rate := m.Rate
@@ -700,7 +701,7 @@ func TestPulseMessageShapeWhenLocked(t *testing.T) {
 // and enough samples are fed for the selector to actually rank and choose.
 func TestPulseUpdateDoesNotMutateTheChunk(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 	rate, nch := m.Rate, m.NumChannels()
 
@@ -755,7 +756,7 @@ func TestPulseUpdateDoesNotMutateTheChunk(t *testing.T) {
 }
 
 func TestPulseUpdateIgnoresNonPulseStreams(t *testing.T) {
-	c := newClient(sample.Athena())
+	c := newClient(sample.Athena(), nil)
 	eeg := sample.Chunk{
 		Stream:     sample.EEG,
 		Timestamps: []float64{1000},
@@ -769,7 +770,7 @@ func TestPulseUpdateIgnoresNonPulseStreams(t *testing.T) {
 func TestPulseUpdateAbsentWithoutPulseStream(t *testing.T) {
 	// A device with EEG only: no pulse stream, so no tracker and no messages.
 	set := sample.NewSet(sample.MetaFor(sample.EEG))
-	c := newClient(set)
+	c := newClient(set, nil)
 	chunk := sample.Chunk{
 		Stream:     sample.EEG,
 		Timestamps: []float64{1000},
@@ -782,7 +783,7 @@ func TestPulseUpdateAbsentWithoutPulseStream(t *testing.T) {
 
 func TestPulseMessageNullsBeforeLock(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 
 	// One second of flat signal: not enough for anything.
@@ -834,7 +835,7 @@ func pulseFlatChunk(nch int, ts float64) sample.Chunk {
 // how an outlier timestamp arises.
 func TestPulseUpdateResyncsAfterForwardTimestampOutlier(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 	nch := m.NumChannels()
 
@@ -868,7 +869,7 @@ func TestPulseUpdateResyncsAfterForwardTimestampOutlier(t *testing.T) {
 // Deleting pulseUpdate's throttle check must fail this test.
 func TestPulseUpdateThrottleRate(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 	nch := m.NumChannels()
 
@@ -897,8 +898,8 @@ func TestPulseUpdateThrottleRate(t *testing.T) {
 // not throttle each other.
 func TestPulseUpdateThrottleIsPerClient(t *testing.T) {
 	set := sample.Athena()
-	c1 := newClient(set)
-	c2 := newClient(set)
+	c1 := newClient(set, nil)
+	c2 := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 	nch := m.NumChannels()
 
@@ -918,7 +919,7 @@ func TestPulseUpdateThrottleIsPerClient(t *testing.T) {
 
 func TestPulseMessageBeatsNeverNull(t *testing.T) {
 	set := sample.Athena()
-	c := newClient(set)
+	c := newClient(set, nil)
 	m := set.MetaFor(sample.Optics)
 	nch := m.NumChannels()
 
@@ -939,4 +940,244 @@ func TestPulseMessageBeatsNeverNull(t *testing.T) {
 	if strings.Contains(string(b), `"beats":null`) {
 		t.Errorf("marshalled beats as null: %s", b)
 	}
+}
+
+// ------------------------------------------------------------------ battery
+
+// batterySource returns a Config.Battery provider over a value the test drives,
+// plus the setter. It stands in for a headband whose level changes.
+func batterySource(pct float64, known bool) (func() (float64, bool), func(float64, bool)) {
+	var mu sync.Mutex
+	get := func() (float64, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return pct, known
+	}
+	set := func(p float64, k bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		pct, known = p, k
+	}
+	return get, set
+}
+
+// The viewer hides its battery indicator entirely for a source that has none,
+// so hello has to distinguish that from a level that is merely not known yet.
+func TestHelloReportsWhetherTheSourceHasABattery(t *testing.T) {
+	_, ts := newBatteryTestServer(t, nil)
+	if _, hello := dial(t, ts); hello.Battery {
+		t.Error("hello says battery is available for a source with no provider")
+	}
+
+	get, _ := batterySource(0, false)
+	_, ts = newBatteryTestServer(t, get)
+	if _, hello := dial(t, ts); !hello.Battery {
+		t.Error("hello says no battery for a source that provides one, " +
+			"even though the level is not known yet")
+	}
+}
+
+// newBatteryTestServer is newTestServer with a battery provider.
+func newBatteryTestServer(t *testing.T, battery func() (float64, bool)) (*hub.Hub, *httptest.Server) {
+	t.Helper()
+	h := hub.New()
+	s := New(Config{Hub: h, Battery: battery})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		h.Close()
+	})
+	return h, ts
+}
+
+func TestBatteryUpdateAbsentWithoutAProvider(t *testing.T) {
+	c := newClient(sample.Classic(), nil)
+	if _, ok := c.batteryUpdate(time.Now()); ok {
+		t.Error("a client with no battery provider produced a message")
+	}
+}
+
+// The first message goes out even when the level is unknown, and marshals the
+// percentage as null rather than as a zero the browser would draw as flat.
+func TestBatteryMessageIsNullBeforeTheFirstReading(t *testing.T) {
+	get, _ := batterySource(0, false)
+	c := newClient(sample.Classic(), get)
+
+	msg, ok := c.batteryUpdate(time.Now())
+	if !ok {
+		t.Fatal("the first battery update was suppressed")
+	}
+	if msg.Type != "battery" {
+		t.Errorf("type = %q, want %q", msg.Type, "battery")
+	}
+	if msg.Percent != nil {
+		t.Errorf("percent = %v, want null before any reading", *msg.Percent)
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"percent":null`) {
+		t.Errorf("unknown level did not marshal as null: %s", b)
+	}
+}
+
+// A cell that drains a percent an hour must not generate a message every poll:
+// only a changed whole percent is news.
+func TestBatteryUpdateOnlySendsOnChange(t *testing.T) {
+	get, set := batterySource(84, true)
+	c := newClient(sample.Classic(), get)
+
+	now := time.Now()
+	msg, ok := c.batteryUpdate(now)
+	if !ok {
+		t.Fatal("the first battery update was suppressed")
+	}
+	if msg.Percent == nil || *msg.Percent != 84 {
+		t.Fatalf("percent = %v, want 84", msg.Percent)
+	}
+
+	// Same level, a poll interval later: nothing to say.
+	now = now.Add(batteryInterval)
+	if _, ok := c.batteryUpdate(now); ok {
+		t.Error("an unchanged level produced a second message")
+	}
+
+	// A sub-percent wobble is below what the viewer displays, so it is not a
+	// change either.
+	set(84.4, true)
+	now = now.Add(batteryInterval)
+	if _, ok := c.batteryUpdate(now); ok {
+		t.Error("a sub-percent change produced a message")
+	}
+
+	// A whole percent is.
+	set(83, true)
+	now = now.Add(batteryInterval)
+	msg, ok = c.batteryUpdate(now)
+	if !ok {
+		t.Fatal("a one-percent drop produced no message")
+	}
+	if msg.Percent == nil || *msg.Percent != 83 {
+		t.Fatalf("percent = %v, want 83", msg.Percent)
+	}
+}
+
+func TestBatteryUpdateThrottlesPolling(t *testing.T) {
+	get, set := batterySource(84, true)
+	c := newClient(sample.Classic(), get)
+
+	now := time.Now()
+	if _, ok := c.batteryUpdate(now); !ok {
+		t.Fatal("the first battery update was suppressed")
+	}
+
+	// Changed, but before the next poll is due.
+	set(50, true)
+	if _, ok := c.batteryUpdate(now.Add(batteryInterval / 2)); ok {
+		t.Error("polled before the interval elapsed")
+	}
+	if _, ok := c.batteryUpdate(now.Add(batteryInterval)); !ok {
+		t.Error("did not poll once the interval elapsed")
+	}
+}
+
+// Going from a known level back to unknown is itself news — it is what a
+// headband that has stopped reporting looks like — so it must not be swallowed
+// by the change check.
+func TestBatteryUpdateReportsALevelBecomingUnknown(t *testing.T) {
+	get, set := batterySource(84, true)
+	c := newClient(sample.Classic(), get)
+
+	now := time.Now()
+	if _, ok := c.batteryUpdate(now); !ok {
+		t.Fatal("the first battery update was suppressed")
+	}
+
+	set(0, false)
+	now = now.Add(batteryInterval)
+	msg, ok := c.batteryUpdate(now)
+	if !ok {
+		t.Fatal("a level becoming unknown produced no message")
+	}
+	if msg.Percent != nil {
+		t.Errorf("percent = %v, want null", *msg.Percent)
+	}
+}
+
+// An implausible level is passed through rather than clamped: it means the
+// decode is wrong, and the server hiding that would make it much harder to
+// find. The browser clamps the bar it draws, not the number it shows.
+func TestBatteryUpdateDoesNotClamp(t *testing.T) {
+	get, _ := batterySource(128, true)
+	c := newClient(sample.Classic(), get)
+
+	msg, ok := c.batteryUpdate(time.Now())
+	if !ok {
+		t.Fatal("the first battery update was suppressed")
+	}
+	if msg.Percent == nil || *msg.Percent != 128 {
+		t.Fatalf("percent = %v, want 128 passed through unclamped", msg.Percent)
+	}
+}
+
+// Throttle and change-detection state is per connection, like the filter and
+// the pulse tracker: a viewer that connects late must get the current level
+// immediately rather than waiting for the next change.
+func TestBatteryUpdateIsPerClient(t *testing.T) {
+	get, _ := batterySource(77, true)
+	c1 := newClient(sample.Classic(), get)
+	c2 := newClient(sample.Classic(), get)
+
+	now := time.Now()
+	if _, ok := c1.batteryUpdate(now); !ok {
+		t.Fatal("the first client got no battery message")
+	}
+	if _, ok := c1.batteryUpdate(now); ok {
+		t.Fatal("the first client got a duplicate")
+	}
+	if _, ok := c2.batteryUpdate(now); !ok {
+		t.Error("a second client did not get the current level")
+	}
+}
+
+// The end-to-end path: a headband reporting a level reaches the browser as a
+// battery text frame.
+func TestBatteryMessageReachesTheClient(t *testing.T) {
+	get, _ := batterySource(64, true)
+	h, ts := newBatteryTestServer(t, get)
+
+	conn, hello := dial(t, ts)
+	if !hello.Battery {
+		t.Fatal("hello does not advertise a battery")
+	}
+
+	chunk := sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{1000, 1000.00390625},
+		Data:       [][]float64{{1, 2}, {3, 4}, {5, 6}, {7, 8}, {9, 10}},
+	}
+	go publishUntilReceived(t, h, chunk)
+
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+	deadline := time.Now().Add(readTimeout)
+	for time.Now().Before(deadline) {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+		var msg BatteryMessage
+		if err := json.Unmarshal(data, &msg); err != nil || msg.Type != "battery" {
+			continue
+		}
+		if msg.Percent == nil || *msg.Percent != 64 {
+			t.Fatalf("percent = %v, want 64", msg.Percent)
+		}
+		return
+	}
+	t.Fatal("no battery message arrived")
 }

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -63,6 +64,14 @@ const (
 	// often than a heart beats; it exists so the readout feels live rather
 	// than to carry new beats.
 	pulseIntervalSec = 0.25
+
+	// batteryInterval is how often the battery provider is polled. A headband
+	// reports its level every five to ten seconds and a cell takes hours to
+	// move a percent, so this is about noticing a fresh reading promptly, not
+	// about resolution. Polling is cheap — one mutex-guarded read — and a
+	// message only goes out when the value actually changes, so the interval
+	// costs nothing when nothing is happening.
+	batteryInterval = 2 * time.Second
 )
 
 // Config configures a Server.
@@ -76,6 +85,15 @@ type Config struct {
 	// Athena's EEG is 4 channels where a classic headband's is 5. Nil means
 	// the classic layout.
 	Streams *sample.Set
+
+	// Battery reports the source's battery level as a percentage, and whether
+	// one has been reported yet. It is polled from the WebSocket writer
+	// goroutines, so it must be safe for concurrent use.
+	//
+	// Nil means this source has no battery at all, which is a different thing
+	// from a source whose level is not known yet: the viewer hides the
+	// indicator entirely for the first and shows it as unknown for the second.
+	Battery func() (float64, bool)
 }
 
 // Server serves the viewer app and the sample WebSocket.
@@ -108,6 +126,11 @@ type StreamInfo struct {
 type Hello struct {
 	Type    string       `json:"type"`
 	Streams []StreamInfo `json:"streams"`
+	// Battery says whether this source reports a battery level at all, so the
+	// viewer can leave the indicator out rather than showing a permanently
+	// blank one. It is not the level itself: that arrives in a BatteryMessage
+	// once the headband has sent one.
+	Battery bool `json:"battery"`
 }
 
 // PulseMessage is the derived heart-rate message, sent as a WebSocket text
@@ -125,6 +148,17 @@ type PulseMessage struct {
 	IBIMs     *float64  `json:"ibiMs"`
 	Beats     []float64 `json:"beats"`
 	BeatCount int       `json:"beatCount"`
+}
+
+// BatteryMessage carries the headband's charge level, as a WebSocket text
+// frame like PulseMessage.
+//
+// Percent is a pointer for the same reason the pulse fields are: a headband
+// sends no battery block for the first several seconds after connecting, and an
+// unknown level must not arrive in the browser as a flat 0%.
+type BatteryMessage struct {
+	Type    string   `json:"type"`
+	Percent *float64 `json:"percent"`
 }
 
 // Health is the /healthz body.
@@ -210,8 +244,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // hello builds the metadata message for a new client.
-func hello(streams *sample.Set) Hello {
-	h := Hello{Type: "hello"}
+func hello(streams *sample.Set, hasBattery bool) Hello {
+	h := Hello{Type: "hello", Battery: hasBattery}
 	for _, id := range streams.All() {
 		m := streams.MetaFor(id)
 		h.Streams = append(h.Streams, StreamInfo{
@@ -254,7 +288,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.clients.Add(1)
 	defer s.clients.Add(-1)
 
-	msg, err := json.Marshal(hello(s.cfg.Streams))
+	msg, err := json.Marshal(hello(s.cfg.Streams, s.cfg.Battery != nil))
 	if err != nil {
 		return
 	}
@@ -268,7 +302,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	chunks, unsubscribe := s.cfg.Hub.Subscribe(subscriberBuffer)
 	defer unsubscribe()
 
-	cl := newClient(s.cfg.Streams)
+	cl := newClient(s.cfg.Streams, s.cfg.Battery)
 	go cl.readLoop(ctx, cancel, conn)
 
 	for {
@@ -289,19 +323,38 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if msg, due := cl.pulseUpdate(c); due {
-				b, merr := json.Marshal(msg)
-				if merr != nil {
-					continue // A message we cannot encode is not worth dropping the viewer for.
+				if !writeJSON(ctx, conn, msg) {
+					return
 				}
-				wctx, wcancel := context.WithTimeout(ctx, writeTimeout)
-				err := conn.Write(wctx, websocket.MessageText, b)
-				wcancel()
-				if err != nil {
+			}
+
+			// Battery is polled here rather than on its own ticker so that the
+			// connection keeps a single writer and needs no extra
+			// synchronisation. The cost is that the level stops updating when
+			// no chunks arrive at all — but that is a stream that is seconds
+			// away from the auto-disconnect watchdog, and a stale battery
+			// reading is the least of what the viewer has to show then.
+			if msg, due := cl.batteryUpdate(time.Now()); due {
+				if !writeJSON(ctx, conn, msg) {
 					return
 				}
 			}
 		}
 	}
+}
+
+// writeJSON sends v as a text frame and reports whether the connection is still
+// usable. A value that cannot be encoded is skipped rather than fatal — that is
+// a bug in the message, not a reason to drop the viewer — while a failed write
+// means the connection is gone.
+func writeJSON(ctx context.Context, conn *websocket.Conn, v any) bool {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return true
+	}
+	wctx, wcancel := context.WithTimeout(ctx, writeTimeout)
+	defer wcancel()
+	return conn.Write(wctx, websocket.MessageText, b) == nil
 }
 
 // client is the per-connection state: the requested settings, and the DSP
@@ -331,12 +384,23 @@ type client struct {
 	pulseID    sample.StreamID
 	pulseNames []string
 	nextPulse  float64
+
+	// Battery polling, also writer-goroutine-owned. battery is nil when the
+	// source has none. sentBattery guards the first send: without it, a source
+	// whose level is not known yet would never produce a message at all, and
+	// the viewer could not tell "waiting for the first reading" from "the
+	// server forgot about me".
+	battery     func() (float64, bool)
+	nextBattery time.Time
+	sentBattery bool
+	lastPct     int
+	lastKnown   bool
 }
 
 // newClient sizes the per-viewer DSP to the connected headband's EEG stream:
 // the filter banks carry one history per channel, so a 4-channel Athena and a
 // 5-channel classic headband need differently shaped state.
-func newClient(streams *sample.Set) *client {
+func newClient(streams *sample.Set, battery func() (float64, bool)) *client {
 	m, ok := streams.Meta(sample.EEG)
 	if !ok {
 		// No EEG on this device: the banks are never used, but they must not
@@ -345,8 +409,9 @@ func newClient(streams *sample.Set) *client {
 	}
 	nch, rate := m.NumChannels(), m.Rate
 	c := &client{
-		bank: dsp.NewBank(dsp.FirwinBandpass(filterTaps, filterLow, filterHigh, rate), nch),
-		dc:   dsp.NewDCBlockerBank(0.5, rate, nch),
+		bank:    dsp.NewBank(dsp.FirwinBandpass(filterTaps, filterLow, filterHigh, rate), nch),
+		dc:      dsp.NewDCBlockerBank(0.5, rate, nch),
+		battery: battery,
 	}
 
 	// Optics and PPG are alternatives — an Athena has the first, a classic
@@ -419,6 +484,44 @@ func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
 	if snap.HasIBI {
 		v := snap.IBIMs
 		msg.IBIMs = &v
+	}
+	return msg, true
+}
+
+// batteryUpdate polls the source's battery and reports whether a message is
+// due. It returns false for sources with no battery, between poll intervals,
+// and — the common case by far — when the level has not moved since the last
+// message: a cell that drains a percent an hour would otherwise generate
+// thousands of identical frames for every one that carries news.
+//
+// The level is compared as a whole percent because that is what the viewer
+// displays. Below that, the Athena's 1/512 quantisation and a classic
+// headband's fuel gauge both jitter in the low bits, which would defeat the
+// change check without changing anything anyone can see.
+func (c *client) batteryUpdate(now time.Time) (BatteryMessage, bool) {
+	if c.battery == nil {
+		return BatteryMessage{}, false
+	}
+	if c.sentBattery && now.Before(c.nextBattery) {
+		return BatteryMessage{}, false
+	}
+	c.nextBattery = now.Add(batteryInterval)
+
+	pct, known := c.battery()
+	rounded := int(math.Round(pct))
+	if c.sentBattery && known == c.lastKnown && (!known || rounded == c.lastPct) {
+		return BatteryMessage{}, false
+	}
+	c.sentBattery, c.lastKnown, c.lastPct = true, known, rounded
+
+	msg := BatteryMessage{Type: "battery"}
+	if known {
+		// The raw percentage goes out, not the rounded one, and it is not
+		// clamped to 100: a level outside the plausible range means the decode
+		// is wrong, and hiding that in the viewer would make it much harder to
+		// find. The browser clamps the bar it draws, not the number it shows.
+		v := pct
+		msg.Percent = &v
 	}
 	return msg, true
 }

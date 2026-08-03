@@ -15,10 +15,22 @@
     <span class="tagline">live headband stream</span>
   </div>
 
-  <div class="link" id="link" data-state="connecting">
-    <span class="link-dot" aria-hidden="true"></span>
-    <span class="link-text" id="linkText">Connecting</span>
-    <span class="link-rate mono" id="linkRate"></span>
+  <div class="status">
+    <!-- Hidden until the server's hello says this headband reports a battery
+         at all. A level it has not sent yet shows as an empty cell and a dash,
+         never as a fill: see applyBattery in app.js. -->
+    <div class="battery" id="battery" data-level="unknown" hidden aria-label="Headband battery">
+      <span class="battery-cell" aria-hidden="true">
+        <span class="battery-fill" id="batteryFill"></span>
+      </span>
+      <output class="battery-pct mono" id="batteryPct">—</output>
+    </div>
+
+    <div class="link" id="link" data-state="connecting">
+      <span class="link-dot" aria-hidden="true"></span>
+      <span class="link-text" id="linkText">Connecting</span>
+      <span class="link-rate mono" id="linkRate"></span>
+    </div>
   </div>
 </header>
 

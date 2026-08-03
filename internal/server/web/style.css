@@ -139,6 +139,79 @@ kbd {
 
 .link-rate { color: var(--text-muted); }
 
+/* The right-hand cluster: battery, then link state. Battery goes first so the
+   link dot stays pinned to the corner where it has always been. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.battery {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+}
+.battery[hidden] { display: none; }
+
+/* Drawn rather than an SVG icon so the fill is a plain width — one number to
+   set from the message — and so the outline inherits the same hairline weight
+   as the rest of the chrome. */
+.battery-cell {
+  position: relative;
+  width: 26px;
+  height: 13px;
+  padding: 2px;
+  border: 1px solid var(--text-muted);
+  border-radius: 3px;
+}
+
+/* The terminal nub on the positive end. */
+.battery-cell::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  width: 2px;
+  height: 5px;
+  transform: translateY(-50%);
+  border-radius: 0 1px 1px 0;
+  background: var(--text-muted);
+}
+
+.battery-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--text-muted);
+  /* Readings arrive seconds apart and whole percents at a time, so the fill is
+     eased to keep it from stepping. linear, not a spring: this is a gauge. */
+  transition: width 400ms linear;
+}
+
+.battery-pct {
+  min-width: 4ch;
+  font-size: 12px;
+  text-align: right;
+}
+
+/* Level bands. "unknown" keeps the muted outline and a zero-width fill: the
+   viewer must not paint a plausible-looking level the headband never sent. */
+.battery[data-level="ok"] .battery-fill { background: var(--good); }
+.battery[data-level="low"] .battery-fill { background: var(--warning); }
+.battery[data-level="critical"] .battery-fill { background: var(--critical); }
+.battery[data-level="critical"] .battery-cell { border-color: var(--critical); }
+.battery[data-level="critical"] .battery-cell::after { background: var(--critical); }
+.battery[data-level="critical"] .battery-pct { color: var(--critical); }
+
+@media (prefers-reduced-motion: reduce) {
+  .battery-fill { transition: none; }
+}
+
 /* --------------------------------------------------------------- console */
 
 .console {

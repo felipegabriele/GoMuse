@@ -95,7 +95,10 @@
     eegChannels: document.getElementById('eegChannels'),
     eegRate: document.getElementById('eegRate'),
     pulseSummary: document.getElementById('pulseSummary'),
-    pulseBpm: document.getElementById('pulseBpm')
+    pulseBpm: document.getElementById('pulseBpm'),
+    battery: document.getElementById('battery'),
+    batteryFill: document.getElementById('batteryFill'),
+    batteryPct: document.getElementById('batteryPct')
   };
 
   // ---------------------------------------------------------- ring buffer
@@ -377,6 +380,36 @@
     if (el.pulseBpm) el.pulseBpm.textContent = pulse.bpm === null ? '—' : pulse.bpm.toFixed(0);
   }
 
+  // Battery level bands, in percent. Below LOW the cell turns amber, below
+  // CRITICAL the whole indicator turns red — a headband that dies mid-session
+  // takes the recording with it, so the warning is worth being loud.
+  var BATTERY_LOW = 30;
+  var BATTERY_CRITICAL = 10;
+
+  // applyBattery paints the header indicator. A null percent means the headband
+  // has not reported a level yet, which shows as an empty cell and a dash: an
+  // unknown battery and a flat one must not look the same.
+  function applyBattery(msg) {
+    var pct = msg && typeof msg.percent === 'number' ? msg.percent : null;
+    if (!el.battery) return;
+
+    if (pct === null) {
+      el.battery.dataset.level = 'unknown';
+      if (el.batteryFill) el.batteryFill.style.width = '0%';
+      if (el.batteryPct) el.batteryPct.textContent = '—';
+      return;
+    }
+
+    // The number is shown as the server sent it, but the bar is clamped: a
+    // level outside 0..100 means the decode is wrong, and a fill that overflows
+    // its cell would misreport that as a full battery.
+    var clamped = Math.max(0, Math.min(100, pct));
+    el.battery.dataset.level =
+      pct <= BATTERY_CRITICAL ? 'critical' : pct <= BATTERY_LOW ? 'low' : 'ok';
+    if (el.batteryFill) el.batteryFill.style.width = clamped + '%';
+    if (el.batteryPct) el.batteryPct.textContent = Math.round(pct) + '%';
+  }
+
   var PANELS = {
     ppg: 'panel-ppg',
     optics: 'panel-optics',
@@ -405,6 +438,12 @@
     pulse.state = 'no pulse';
     pulse.bpm = null;
     if (el.pulseBpm) el.pulseBpm.textContent = '—';
+
+    // Only sources that report a level get the indicator at all. Reset it as
+    // well as its visibility, so reconnecting does not leave the previous
+    // device's charge on screen while the new one is still silent.
+    if (el.battery) el.battery.hidden = !hello.battery;
+    applyBattery(null);
   }
 
   function build(hello) {
@@ -664,6 +703,7 @@
         try { msg = JSON.parse(e.data); } catch (err) { return; }
         if (msg && msg.type === 'hello' && !state.built) build(msg);
         else if (msg && msg.type === 'pulse') applyPulse(msg);
+        else if (msg && msg.type === 'battery') applyBattery(msg);
         return;
       }
       var frame = decodeFrame(e.data);
