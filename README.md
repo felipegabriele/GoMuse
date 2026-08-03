@@ -190,24 +190,24 @@ amplitude, and toggle the 1–40 Hz display filter from the controls or keyboard
 | `-` | Shorten the time window |
 | `d` | Toggle the EEG display filter |
 
-The **Pulse** panel appears whenever the headband has a pulse sensor — PPG on a
-classic Muse, optics on an Athena. It plots whichever channel currently carries
-the strongest pulse, overlays a marker on each detected beat, and reads out:
+A heart-rate readout sits at the end of the display-control row whenever the
+headband has a pulse sensor — PPG on a classic Muse, optics on an Athena. The
+server picks whichever channel currently carries the strongest pulse, detects
+beats on it, and pushes the derived rate to the viewer; the browser computes
+none of it.
 
-| Readout      | Meaning                                                      |
-| ------------ | ------------------------------------------------------------ |
-| bpm          | Heart rate, the median of the last few beat-to-beat intervals |
-| ms RMSSD     | Heart-rate variability over the last 60 s                     |
-| ms last beat | The most recent beat-to-beat interval                         |
-| state        | `no pulse`, `acquiring`, or `locked`                          |
-| channel      | The channel the numbers are being derived from                |
+The readout shows a bpm figure only once the rate is locked, and a dash
+otherwise, so it never displays a fabricated number. Two different situations
+show that dash: no channel carries enough modulation — usually the headband is
+not on properly — or one does, but too few clean beats have accumulated yet. A
+locked rate is highlighted, so a provisional one still reads as provisional.
+Expect a few seconds to reach a lock, and the same again after moving the
+headband.
 
-Numbers are shown only in the `locked` state, so the panel never displays a
-fabricated rate: `no pulse` means no channel carries enough modulation — usually
-the headband is not on properly — and `acquiring` means it does but too few clean
-beats have accumulated yet. RMSSD additionally waits for about 30 s of beats,
-because it is not meaningful over less. Expect a few seconds to reach `locked`,
-and the same again after moving the headband.
+The WebSocket `pulse` message carries more than the viewer draws: RMSSD
+heart-rate variability over the last 60 s (reported only after about 30 s of
+beats, because it is not meaningful over less), the most recent beat-to-beat
+interval, the selected channel name, and the beat timestamps themselves.
 
 The server also exposes `GET /healthz`, which reports its status, connected
 viewer count, and dropped display chunks as JSON.
