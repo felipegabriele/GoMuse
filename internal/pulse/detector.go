@@ -7,11 +7,14 @@ import (
 )
 
 const (
-	// RefractorySec is the shortest accepted gap between beats: 300 ms caps
-	// detection at 200 bpm and, more usefully, rejects the dicrotic notch —
-	// the secondary bump every real PPG waveform carries about 100 ms after
-	// systole, which would otherwise double the reported rate.
-	RefractorySec = 0.30
+	// RefractorySec is the shortest accepted gap between beats. A real optical
+	// channel can carry a broad reflected wave 300-400 ms after systole, not
+	// just the small ~100 ms dicrotic notch seen in idealised PPG. Accepting
+	// that second maximum is what makes a resting rate of roughly 67 bpm look
+	// like 143-160 bpm. 450 ms rejects both maxima while retaining rates up to
+	// 133 bpm, which covers the stationary use for which a headband pulse
+	// reading is meaningful.
+	RefractorySec = 0.45
 
 	// PeakFraction of the running peak estimate is the detection threshold.
 	PeakFraction = 0.5

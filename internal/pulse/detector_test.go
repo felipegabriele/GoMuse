@@ -78,6 +78,38 @@ func TestDetectorRefractoryRejectsDoublePeaks(t *testing.T) {
 	}
 }
 
+// Real optics channels can have a broad reflected maximum much later than the
+// textbook dicrotic notch. With the old 300 ms refractory period, both maxima
+// were accepted and a resting pulse was displayed at approximately twice its
+// actual rate.
+func TestDetectorRejectsLateReflectedWave(t *testing.T) {
+	const rate, bpm = 64.0, 67.0
+	n := int(rate * 20)
+	samples := make([]float64, n)
+	ts := make([]float64, n)
+	for i := range samples {
+		e := float64(i) / rate
+		phase := math.Mod(e*(bpm/60), 1)
+		systolic := math.Exp(-(phase - 0.12) / 0.045 * ((phase - 0.12) / 0.045))
+		// 0.44 cycles is 394 ms at 67 bpm: late enough to pass the old
+		// 300 ms guard and produce a false rate around 150 bpm.
+		reflected := 0.85 * math.Exp(-(phase-0.56)/0.05*((phase-0.56)/0.05))
+		samples[i] = 100000 * (1 + 0.04*(systolic+reflected))
+		ts[i] = 1000 + e
+	}
+
+	d := NewDetector(rate)
+	beats, _ := d.Process(samples, ts)
+	if len(beats) < 20 || len(beats) > 24 {
+		t.Fatalf("detected %d beats over 20 s at 67 bpm, want 20-24; late reflected waves may be counted as beats", len(beats))
+	}
+	span := beats[len(beats)-1] - beats[0]
+	got := 60 * float64(len(beats)-1) / span
+	if math.Abs(got-bpm) > 3 {
+		t.Errorf("implied rate = %.1f bpm, want %.0f +/- 3", got, bpm)
+	}
+}
+
 func TestDetectorReportsGap(t *testing.T) {
 	const rate = 64.0
 	samples, ts := pulseTrain(int(rate*5), rate, 72, 100000, 0.04)
