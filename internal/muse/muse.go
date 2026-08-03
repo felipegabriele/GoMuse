@@ -149,6 +149,11 @@ type Client struct {
 	// warnf reports a non-fatal problem. A field so tests can capture it.
 	warnf func(string)
 
+	// battery holds the classic path's last telemetry reading. The Athena
+	// keeps its own inside athenaStreamer, next to the packet decoding that
+	// produces it, so this stays empty on that path.
+	battery batteryState
+
 	mu       sync.Mutex
 	lastData time.Time
 
@@ -159,13 +164,16 @@ type Client struct {
 // valid once Connect has returned successfully.
 func (c *Client) Streams() *sample.Set { return c.streams }
 
-// Battery returns the last reported battery percentage, or 0 if the headband
-// has not reported one. Only the Athena protocol carries it.
-func (c *Client) Battery() float64 {
-	if c.athena == nil {
-		return 0
+// Battery returns the last reported battery percentage and whether one has been
+// reported yet. Both generations carry it — the Athena in a tagged sensor
+// block, a classic headband in its telemetry packet — but neither sends one on
+// connect, so false is normal for the first several seconds of a session and
+// means "not known yet", not "no battery".
+func (c *Client) Battery() (float64, bool) {
+	if c.athena != nil {
+		return c.athena.battery()
 	}
-	return c.athena.battery()
+	return c.battery.get()
 }
 
 func (c *Client) warn(msg string) {
@@ -232,7 +240,7 @@ func resolveAddress(ctx context.Context, cfg Config) (bluetooth.Address, error) 
 		return addr, err
 	}
 	if len(found) == 0 {
-		return addr, errors.New("muse: no headband found (is it powered on and out of its case?)")
+		return addr, errors.New("muse: no headband found (is it powered on?)")
 	}
 
 	if cfg.Name != "" {
@@ -520,7 +528,35 @@ func (c *Client) subscribeStreams(chars map[string]bluetooth.DeviceCharacteristi
 			return err
 		}
 	}
+
+	c.subscribeTelemetry(chars)
 	return nil
+}
+
+// subscribeTelemetry wires up the battery readout. It has no stream flag and no
+// entry in requiredChars, because telemetry is housekeeping rather than a
+// sample stream: it costs one notification every ten seconds, and a headband
+// that lacks it or refuses the subscription should lose the battery indicator,
+// not the whole session. Hence a warning rather than an error.
+func (c *Client) subscribeTelemetry(chars map[string]bluetooth.DeviceCharacteristic) {
+	ch, ok := chars[CharTelemetry]
+	if !ok {
+		c.warn("headband does not expose telemetry; battery level unavailable")
+		return
+	}
+	err := ch.EnableNotifications(func(buf []byte) {
+		t, ok := DecodeTelemetry(buf)
+		if !ok {
+			return // a malformed packet is not worth tearing the stream down
+		}
+		// Deliberately no c.touch(): telemetry keeps arriving after the data
+		// characteristics have gone quiet, and feeding it to the watchdog
+		// would hold a dead session open instead of auto-disconnecting.
+		c.battery.set(t.BatteryPct)
+	})
+	if err != nil {
+		c.warn("subscribe to telemetry failed; battery level unavailable: " + err.Error())
+	}
 }
 
 // notifyChannel wires one characteristic of a multi-channel stream into the

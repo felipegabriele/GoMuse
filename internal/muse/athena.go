@@ -309,9 +309,13 @@ type athenaStreamer struct {
 	now     func() float64
 	streams map[sample.StreamID]bool
 
-	mu         sync.Mutex
-	dejitters  map[sample.StreamID]*Dejitter
+	mu        sync.Mutex
+	dejitters map[sample.StreamID]*Dejitter
+	// batteryPct is only meaningful once batteryOK is set: a headband that has
+	// not yet sent a battery block and one reporting a flat cell must not read
+	// the same, and tag 0x88 arrives only every five seconds.
 	batteryPct float64
+	batteryOK  bool
 }
 
 func newAthenaStreamer(cfg Config, publish func(sample.Chunk), touch func(), now func() float64) *athenaStreamer {
@@ -341,11 +345,12 @@ func (a *athenaStreamer) timestamps(id sample.StreamID, rate float64, n int, arr
 	return d.NextArrival(n, arrival)
 }
 
-// battery returns the last reported battery percentage.
-func (a *athenaStreamer) battery() float64 {
+// battery returns the last reported battery percentage, and whether one has
+// been reported at all.
+func (a *athenaStreamer) battery() (float64, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.batteryPct
+	return a.batteryPct, a.batteryOK
 }
 
 // handleControl receives the headband's replies to control commands. They are
@@ -382,7 +387,7 @@ func (a *athenaStreamer) handleBlock(b athenaBlock, arrival float64) {
 	switch s.kind {
 	case "battery":
 		if pct, ok := decodeAthenaBattery(b.payload); ok {
-			a.batteryPct = pct
+			a.batteryPct, a.batteryOK = pct, true
 		}
 
 	case "eeg":

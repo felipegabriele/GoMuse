@@ -335,8 +335,8 @@ func TestAthenaStreamerIgnoresGarbage(t *testing.T) {
 
 func TestAthenaStreamerTracksBattery(t *testing.T) {
 	s := newAthenaStreamer(Config{}, func(sample.Chunk) {}, func() {}, fakeClock(1000, 0.01))
-	if got := s.battery(); got != 0 {
-		t.Errorf("battery before any packet = %f, want 0", got)
+	if got, ok := s.battery(); ok {
+		t.Errorf("battery before any packet = (%f, %v), want it reported as unknown", got, ok)
 	}
 
 	// Tag 0x98 battery block: a uint16 scaled by 1/512.
@@ -347,7 +347,11 @@ func TestAthenaStreamerTracksBattery(t *testing.T) {
 	packet[athenaHeaderSize+1] = 0x9C // 0x9C00 = 39936 -> 78%
 	s.handle(packet)
 
-	if got := s.battery(); !closeEnough(got, 78, 0.01) {
+	got, ok := s.battery()
+	if !ok {
+		t.Fatal("battery reported as unknown after a battery block")
+	}
+	if !closeEnough(got, 78, 0.01) {
 		t.Errorf("battery = %f, want about 78", got)
 	}
 }
