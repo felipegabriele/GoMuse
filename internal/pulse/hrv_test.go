@@ -184,6 +184,52 @@ func TestRMSSDWithheldUntilSpanAccumulates(t *testing.T) {
 	}
 }
 
+// TestRMSSDGapDoesNotCountTowardWarmup guards the RMSSDMinSpanSec gate against
+// a data outage substituting for beats. Two five-and-a-bit second runs either
+// side of a 25 s hole are 36.2 s apart end to end, so a gate measuring elapsed
+// time between the oldest and newest interval would open — and report RMSSD off
+// 11.2 s of actual beats, the very case the gate exists to withhold.
+//
+// The scenario is reachable without any test-only contrivance: during a total
+// outage Tracker.Process is never called, so nothing resets the accumulator,
+// and the Detector's gap return calls Break() when data resumes. Both runs stay
+// in the window because 36.2 s is under RMSSDWindowSec.
+func TestRMSSDGapDoesNotCountTowardWarmup(t *testing.T) {
+	h := NewHRV()
+	steady := make([]float64, 7)
+	for i := range steady {
+		steady[i] = 800
+	}
+
+	end := addIntervals(h, 1000, steady) // 7 intervals, 5.6 s of coverage
+	h.Break()
+	addIntervals(h, end+25.0, steady) // 25 s hole, then 5.6 s more
+
+	// Well past LockIntervals, so the count check is not what is withholding.
+	if got := h.IntervalCount(); got != 14 {
+		t.Fatalf("IntervalCount = %d, want 14: both runs should still be in the window", got)
+	}
+	if got := h.ivals[len(h.ivals)-1].at - h.ivals[0].at; got < RMSSDMinSpanSec {
+		t.Fatalf("elapsed span = %.2fs, want >= %v: the test must actually exercise "+
+			"the case where wall-clock passes but coverage does not", got, RMSSDMinSpanSec)
+	}
+	if got, ok := h.RMSSD(); ok {
+		t.Errorf("RMSSD = %v reported off 11.2 s of beats spread over 36.2 s, want "+
+			"none: the 25 s gap must not count toward RMSSDMinSpanSec", got)
+	}
+
+	// And it does open once the missing coverage is genuinely observed: another
+	// ~19 s of clean beats takes the total past 30 s.
+	more := make([]float64, 24)
+	for i := range more {
+		more[i] = 800
+	}
+	addIntervals(h, h.ivals[len(h.ivals)-1].at+0.8, more)
+	if _, ok := h.RMSSD(); !ok {
+		t.Error("RMSSD not reported once 30+ s of beats have actually been seen")
+	}
+}
+
 func TestBeatsReturnsRecentOnly(t *testing.T) {
 	h := NewHRV()
 	for i := 0; i < 10; i++ {

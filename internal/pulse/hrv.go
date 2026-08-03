@@ -23,6 +23,16 @@ const (
 	// RMSSDWindowSec is the analysis window, and RMSSDMinSpanSec how much must
 	// accumulate before RMSSD is shown at all. RMSSD over a handful of seconds
 	// is dominated by whichever beats happen to be in it.
+	//
+	// RMSSDMinSpanSec is measured as accumulated *beat coverage* — the total
+	// duration actually spanned by accepted intervals — not as elapsed time
+	// between the oldest and newest interval in the window. Those differ
+	// whenever data was lost: a 25 s outage between two five-second runs has an
+	// elapsed span of 35 s but only 10 s of observed beats, and reporting RMSSD
+	// off that would be exactly the handful-of-seconds figure this gate exists
+	// to suppress. Outages that short are routine (see the Detector's gap
+	// return), and the RMSSDWindowSec trim keeps both segments, so the elapsed
+	// reading passed the gate on any hole under about a minute.
 	RMSSDWindowSec  = 60.0
 	RMSSDMinSpanSec = 30.0
 
@@ -132,13 +142,27 @@ func (h *HRV) LastIntervalMs() (float64, bool) {
 }
 
 // RMSSD returns the root mean square of successive differences over the window,
-// and whether enough time has accumulated to report it.
+// and whether enough beat coverage has accumulated to report it.
 func (h *HRV) RMSSD() (float64, bool) {
 	if len(h.ivals) < LockIntervals {
 		return 0, false
 	}
-	span := h.ivals[len(h.ivals)-1].at - h.ivals[0].at
-	if span < RMSSDMinSpanSec {
+	// Summing the intervals, rather than subtracting the first interval's time
+	// from the last's, is what makes a data gap not count toward the warm-up:
+	// the hole contributes no interval, so it contributes no coverage. See
+	// RMSSDMinSpanSec.
+	//
+	// This deliberately does not consult interval.chain even though
+	// rmssdOfIntervals right below genuinely must. Every interval is wholly
+	// inside one chain by construction — AddBeat only appends while haveLast is
+	// set, and Break clears haveLast as it bumps chain — so the plain sum is
+	// already same-chain coverage. Chain boundaries matter when *differencing*
+	// two intervals, which this is not doing.
+	coverage := 0.0
+	for _, v := range h.ivals {
+		coverage += v.ms / 1000
+	}
+	if coverage < RMSSDMinSpanSec {
 		return 0, false
 	}
 	return rmssdOfIntervals(h.ivals)
