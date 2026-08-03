@@ -298,6 +298,9 @@ func (c *Client) setup(cfg Config) error {
 		return c.setupAthena(chars, cfg)
 	}
 
+	if !wantsAny(cfg, sample.EEG, sample.PPG, sample.ACC, sample.Gyro) {
+		return errors.New("muse: none of the enabled streams are supported by this classic headband (enable at least one of: eeg, ppg, acc, gyro)")
+	}
 	if missing := missingChars(present, cfg); len(missing) > 0 {
 		return unsupportedDevice(present, missing)
 	}
@@ -356,6 +359,19 @@ func discoverChars(svc bluetooth.DeviceService) (map[string]bluetooth.DeviceChar
 		present[uuid] = true
 	}
 	return out, present, nil
+}
+
+// wantsAny reports whether cfg enables at least one of ids. It is checked only
+// after characteristic discovery identifies the protocol: optics-only is valid
+// for an Athena but would leave a classic headband with no data subscription,
+// while PPG-only has the opposite problem.
+func wantsAny(cfg Config, ids ...sample.StreamID) bool {
+	for _, id := range ids {
+		if cfg.wants(id) {
+			return true
+		}
+	}
+	return false
 }
 
 // requiredChars lists the characteristics cfg needs, in a stable order.

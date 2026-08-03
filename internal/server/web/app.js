@@ -70,6 +70,7 @@
     scale: 100,     // EEG half-height, in the stream's unit
     filter: false,
     epoch: null,    // Unix seconds of the first sample of the session
+    battery: false, // whether hello advertised a battery provider
     built: false
   };
 
@@ -449,6 +450,7 @@
   function build(hello) {
     streams = [];
     streamsById = {};
+    state.battery = !!hello.battery;
     showStages(hello);
 
     hello.streams.forEach(function (meta) {
@@ -480,7 +482,13 @@
   function rebuild() {
     if (!state.built) return;
     var saved = streams.map(function (s) { return s.trace; });
-    build({ streams: streams.map(function (s) { return s.meta; }) });
+    // build also resets optional capabilities from hello. Carry battery
+    // availability through a theme rebuild, or the indicator would disappear
+    // permanently the first time the system colour scheme changes.
+    build({
+      streams: streams.map(function (s) { return s.meta; }),
+      battery: state.battery
+    });
     streams.forEach(function (s, i) {
       if (saved[i] && saved[i].nchan === s.trace.nchan) s.trace = traceResize(saved[i], s.trace.target);
     });

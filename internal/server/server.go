@@ -65,6 +65,12 @@ const (
 	// than to carry new beats.
 	pulseIntervalSec = 0.25
 
+	// pulseStaleSec is how long other live streams may advance without a pulse
+	// chunk before the last rate is withdrawn. Normal PPG packets are less than
+	// 100 ms apart; a full second tolerates routine subscriber drops while
+	// ensuring a stopped notification cannot leave a locked BPM on screen.
+	pulseStaleSec = 1.0
+
 	// batteryInterval is how often the battery provider is polled. A headband
 	// reports its level every five to ten seconds and a cell takes hours to
 	// move a percent, so this is about noticing a fresh reading promptly, not
@@ -380,10 +386,15 @@ type client struct {
 	// nil on exactly the devices where pulseID is never set, so the
 	// coincidence is harmless. Kept as a plain zero value rather than a
 	// sentinel because the guard already makes it correct.
-	tracker    *pulse.Tracker
-	pulseID    sample.StreamID
-	pulseNames []string
-	nextPulse  float64
+	tracker       *pulse.Tracker
+	pulseID       sample.StreamID
+	pulseNames    []string
+	pulseRate     float64
+	pulseChannels int
+	nextPulse     float64
+	lastPulse     float64
+	havePulse     bool
+	pulseStale    bool
 
 	// Battery polling, also writer-goroutine-owned. battery is nil when the
 	// source has none. sentBattery guards the first send: without it, a source
@@ -425,21 +436,38 @@ func newClient(streams *sample.Set, battery func() (float64, bool)) *client {
 		c.tracker = pulse.NewTracker(pm.Rate, pm.NumChannels())
 		c.pulseID = id
 		c.pulseNames = pm.Channels
+		c.pulseRate = pm.Rate
+		c.pulseChannels = pm.NumChannels()
 		break
 	}
 	return c
 }
 
-// pulseUpdate feeds a chunk to the pulse tracker and reports whether a message
-// is due. It returns false for chunks of any other stream, for devices with no
-// pulse stream, and between throttle intervals.
+// pulseUpdate feeds pulse chunks to the tracker and uses every other stream as
+// a freshness clock. It normally returns false for non-pulse chunks, except for
+// the one that proves pulse delivery has gone stale and withdraws the readout.
 func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
-	if c.tracker == nil || chunk.Stream != c.pulseID || chunk.NumSamples() == 0 {
+	if c.tracker == nil || chunk.NumSamples() == 0 {
 		return PulseMessage{}, false
 	}
-	c.tracker.Process(chunk.Data, chunk.Timestamps)
-
 	now := chunk.Timestamps[chunk.NumSamples()-1]
+	if chunk.Stream != c.pulseID {
+		if !c.havePulse || c.pulseStale || now < c.lastPulse || now-c.lastPulse <= pulseStaleSec {
+			return PulseMessage{}, false
+		}
+
+		// Rebuild the whole chain, including selector history. Merely breaking
+		// HRV would leave the old accepted intervals available to BPM(), allowing
+		// a resumed stream to present the pre-outage rate as locked.
+		c.tracker = pulse.NewTracker(c.pulseRate, c.pulseChannels)
+		c.pulseStale = true
+		c.nextPulse = now + pulseIntervalSec
+		return c.pulseMessage(), true
+	}
+
+	c.tracker.Process(chunk.Data, chunk.Timestamps)
+	c.lastPulse, c.havePulse, c.pulseStale = now, true, false
+
 	// In normal operation now advances by roughly one sample step per call,
 	// so it sits within one interval below nextPulse while throttled. If it
 	// is further behind than that, nextPulse was not set from a plausible
@@ -454,6 +482,13 @@ func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
 	}
 	c.nextPulse = now + pulseIntervalSec
 
+	return c.pulseMessage(), true
+}
+
+// pulseMessage serialises the current tracker snapshot. Keeping this separate
+// lets a stale transition publish StateNoPulse without feeding unrelated data
+// into the tracker.
+func (c *client) pulseMessage() PulseMessage {
 	snap := c.tracker.Snapshot()
 	beats := snap.Beats
 	if beats == nil {
@@ -485,7 +520,7 @@ func (c *client) pulseUpdate(chunk sample.Chunk) (PulseMessage, bool) {
 		v := snap.IBIMs
 		msg.IBIMs = &v
 	}
-	return msg, true
+	return msg
 }
 
 // batteryUpdate polls the source's battery and reports whether a message is

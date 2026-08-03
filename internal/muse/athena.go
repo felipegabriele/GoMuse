@@ -20,6 +20,7 @@ package muse
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -434,6 +435,10 @@ func (a *athenaStreamer) handleBlock(b athenaBlock, arrival float64) {
 // setupAthena wires up an Athena headband: subscribe to both data
 // characteristics, run the init sequence, then start streaming.
 func (c *Client) setupAthena(chars map[string]bluetooth.DeviceCharacteristic, cfg Config) error {
+	if !wantsAny(cfg, sample.EEG, sample.ACC, sample.Gyro, sample.Optics) {
+		return errors.New("muse: none of the enabled streams are supported by this Athena headband (enable at least one of: eeg, acc, gyro, optics)")
+	}
+
 	ctrl, ok := chars[CharControl]
 	if !ok {
 		return errNoControl

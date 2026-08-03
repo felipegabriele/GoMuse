@@ -688,6 +688,28 @@ func TestPulseMessageShapeWhenLocked(t *testing.T) {
 	if !strings.Contains(string(b), `"type":"pulse"`) {
 		t.Errorf("marshalled message missing type: %s", b)
 	}
+
+	// If optics notifications stop while another stream remains live, the
+	// locked number must be withdrawn rather than displayed indefinitely.
+	staleAt := 1000 + float64(total-1)/rate + pulseStaleSec + 0.01
+	stale, due := c.pulseUpdate(sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{staleAt},
+		Data:       [][]float64{{0}, {0}, {0}, {0}},
+	})
+	if !due {
+		t.Fatal("no pulse message emitted when the pulse stream became stale")
+	}
+	if stale.State != string(pulse.StateNoPulse) || stale.BPM != nil || stale.Channel != nil {
+		t.Errorf("stale message = %+v, want no-pulse state with no retained reading", stale)
+	}
+	if _, due := c.pulseUpdate(sample.Chunk{
+		Stream:     sample.EEG,
+		Timestamps: []float64{staleAt + 1},
+		Data:       [][]float64{{0}, {0}, {0}, {0}},
+	}); due {
+		t.Error("repeated non-pulse chunks emitted duplicate stale messages")
+	}
 }
 
 // TestPulseUpdateDoesNotMutateTheChunk pins the invariant CLAUDE.md calls out:
