@@ -14,6 +14,7 @@ environment, Lab Streaming Layer, or external web assets required.
 - Serves a responsive live viewer from a single compiled binary
 - Provides an optional 1–40 Hz EEG display filter
 - Derives live heart rate and RMSSD heart-rate variability from the pulse stream
+- Shows the headband's remaining battery percentage in the viewer
 - Records one timestamped CSV file per sensor stream
 - Includes a synthetic signal mode for trying the viewer without a headband
 - Embeds all browser assets and requires no internet access at runtime
@@ -208,6 +209,15 @@ The WebSocket `pulse` message carries more than the viewer draws: RMSSD
 heart-rate variability over the last 60 s (reported only after about 30 s of
 beats, because it is not meaningful over less), the most recent beat-to-beat
 interval, the selected channel name, and the beat timestamps themselves.
+
+A battery indicator sits in the header, next to the connection light. Both
+headband generations report their charge — an Athena in a tagged sensor block,
+a classic Muse in its telemetry packet — and both send the first one only after
+the stream has been running for several seconds. Until then the cell is drawn
+empty with a dash beside it rather than filled in with a guess. The indicator
+turns amber below 30% and red below 10%, since a headband that dies mid-session
+takes the recording with it. Demo mode drains a synthetic battery far faster
+than a real cell, so the readout can be watched moving without a headband.
 
 The server also exposes `GET /healthz`, which reports its status, connected
 viewer count, and dropped display chunks as JSON.

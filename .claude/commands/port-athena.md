@@ -41,10 +41,9 @@ reference over the same captured bytes.
    space via `athenaOpticsIndex`.
 2. **Tag `0x53`** — 2 channels at 32 Hz, purpose unknown; muse-lsl labels it `unknown`
    and drops it. Identify it or leave it alone.
-3. **Battery** — decoded and available via `Client.Battery()`, surfaced nowhere.
-4. **Presets** — only the `p1041` default is exercised. `athenaValidPresets` lists the
+3. **Presets** — only the `p1041` default is exercised. `athenaValidPresets` lists the
    rest; which sensors each enables is not documented anywhere gomuse can see.
-5. **The 8-channel EEG tag `0x12`** — channels 4-7 are decoded then dropped. They are
+4. **The 8-channel EEG tag `0x12`** — channels 4-7 are decoded then dropped. They are
    probably aux/reference; confirm before exposing them.
 
 ## Ground rules
