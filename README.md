@@ -5,11 +5,6 @@ brain-sensing headband over Bluetooth Low Energy. It includes a live browser
 viewer and can write each sensor stream directly to CSV, with no Python
 environment, Lab Streaming Layer, or external web assets required.
 
-The project is a Go port of the device and viewer layers of
-[muse-lsl](https://github.com/alexandrebarachant/muse-lsl). It keeps
-muse-lsl's decoding, timestamp correction, and EEG bandpass behavior while
-replacing the matplotlib viewer with a self-contained web application.
-
 ![gomuse live dashboard](img/gomuse-dashboard.png)
 
 ## Features
