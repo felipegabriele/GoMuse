@@ -50,6 +50,40 @@ type Source struct {
 	gens  []*generator
 	now   func() float64
 	sleep func(context.Context, time.Duration) error
+	start float64
+}
+
+// Synthetic battery behaviour. Like the waveforms, these numbers are chosen to
+// make a viewer feature observable rather than to model anything: a real cell
+// takes hours to shed a percent, which would leave the indicator looking
+// broken for the length of any demo.
+const (
+	// batteryUnknownSec is how long the level reads as unknown. A real
+	// headband sends no battery block on connect — five seconds on an Athena,
+	// ten on a classic telemetry packet — so the viewer's "not known yet"
+	// state is reachable in the demo too, rather than only against hardware.
+	batteryUnknownSec = 3.0
+
+	// batterySecPerPct is how long one percent takes to drain, giving a full
+	// sweep from 100 to 0 in about seventeen minutes.
+	batterySecPerPct = 10.0
+)
+
+// Battery reports a synthetic charge level and whether it is known yet,
+// matching the shape of muse.Client.Battery so the demo drives the viewer's
+// battery indicator down exactly the same path a headband does.
+func (s *Source) Battery() (float64, bool) {
+	elapsed := s.now() - s.start
+	if elapsed < batteryUnknownSec {
+		return 0, false
+	}
+	pct := 100 - (elapsed-batteryUnknownSec)/batterySecPerPct
+	if pct < 0 {
+		// A flat demo battery stays flat; it does not wrap back to full,
+		// because a level that climbs on its own would read as a decode bug.
+		pct = 0
+	}
+	return pct, true
 }
 
 // New returns a Source publishing the selected streams to h with the default
@@ -74,7 +108,7 @@ func NewWithOptions(h *hub.Hub, streams map[sample.StreamID]bool, opts Options) 
 		start = now()
 	}
 
-	s := &Source{hub: h, now: now, sleep: sleep}
+	s := &Source{hub: h, now: now, sleep: sleep, start: start}
 	// Iterate sample.All rather than the map so the generator order — and
 	// therefore the tie-break between the two 52 Hz streams — is stable.
 	for _, id := range sample.All() {

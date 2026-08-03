@@ -356,3 +356,40 @@ func amplitudeAt(x []float64, freq, fs float64) float64 {
 	}
 	return 2 * math.Hypot(re, im) / float64(len(x))
 }
+
+// The demo battery exists to drive the viewer's indicator, so what matters is
+// that it passes through every state the real thing does: unknown at first,
+// then a level that falls, then flat.
+func TestBatteryDrainsFromUnknownToFlat(t *testing.T) {
+	clock := 1000.0
+	src := NewWithOptions(hub.New(), map[sample.StreamID]bool{}, Options{
+		Start: clock,
+		Now:   func() float64 { return clock },
+	})
+
+	if _, ok := src.Battery(); ok {
+		t.Error("battery is known immediately on connect; " +
+			"the viewer's unknown state would be unreachable in the demo")
+	}
+
+	clock += batteryUnknownSec
+	pct, ok := src.Battery()
+	if !ok {
+		t.Fatal("battery still unknown after the unknown window")
+	}
+	if pct != 100 {
+		t.Errorf("battery starts at %f, want 100", pct)
+	}
+
+	clock += 10 * batterySecPerPct
+	if pct, ok = src.Battery(); !ok || pct != 90 {
+		t.Errorf("battery after 10 percent's worth of drain = (%f, %v), want (90, true)", pct, ok)
+	}
+
+	// Well past empty: it stays flat rather than going negative or wrapping
+	// back to full, either of which the viewer would render as nonsense.
+	clock += 1000 * batterySecPerPct
+	if pct, ok = src.Battery(); !ok || pct != 0 {
+		t.Errorf("battery long after empty = (%f, %v), want (0, true)", pct, ok)
+	}
+}
