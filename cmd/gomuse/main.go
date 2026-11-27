@@ -11,8 +11,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -217,6 +220,7 @@ func runStream(ctx context.Context, args []string) error {
 	var cf connFlags
 	cf.register(fs)
 	port := fs.Int("port", 1111, "port for the web viewer")
+	host := fs.String("host", "", "address the viewer listens on; empty means every interface, use 127.0.0.1 to keep it on this computer")
 	recordDir := fs.String("record-dir", "", "also record to CSV in this directory")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -247,14 +251,18 @@ func runStream(ctx context.Context, args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		Addr:    fmt.Sprintf(":%d", *port),
+		Addr:    net.JoinHostPort(*host, strconv.Itoa(*port)),
 		Hub:     h,
 		Streams: streams,
 		Battery: src.battery,
 	})
 	go func() { errs <- srv.ListenAndServe(ctx) }()
 
-	fmt.Fprintf(os.Stderr, "viewer at http://localhost:%d — Ctrl-C to stop\n", *port)
+	shown := *host
+	if shown == "" {
+		shown = "localhost"
+	}
+	fmt.Fprintf(os.Stderr, "viewer at http://%s — Ctrl-C to stop\n", net.JoinHostPort(shown, strconv.Itoa(*port)))
 
 	// The source finishing (auto-disconnect, or the headband going away) ends
 	// the run, so give it the same treatment as a server error.
@@ -277,6 +285,8 @@ func runRecord(ctx context.Context, args []string) error {
 	cf.register(fs)
 	dir := fs.String("dir", ".", "directory for the CSV files")
 	duration := fs.Duration("duration", 0, "stop after this long (0 means run until Ctrl-C)")
+	stdinStop := fs.Bool("stdin-stop", false, "stop and flush when a line \"stop\" arrives on stdin, or stdin closes (for a parent process; works on Windows)")
+	manifestOn := fs.Bool("manifest", false, "write manifest.json (file sizes, row counts, SHA-256, stop reason) into -dir when the recording ends")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -293,7 +303,11 @@ func runRecord(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if *duration > 0 {
-		ctx, cancel = context.WithTimeout(ctx, *duration)
+		ctx, cancel = context.WithTimeoutCause(ctx, *duration, errDuration)
+		defer cancel()
+	}
+	if *stdinStop {
+		ctx, cancel = stopOnStdin(ctx, os.Stdin)
 		defer cancel()
 	}
 
@@ -301,18 +315,27 @@ func runRecord(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	started := time.Now().UTC()
 
 	errs := make(chan error, 2)
 	go func() { errs <- src.run(ctx) }()
 
 	// Run returns when the context is cancelled, having flushed and closed.
 	recErr := rec.Run(ctx, h)
+	// Read the reason before cancel() below, which would otherwise be taken
+	// for the cause when the run ended on its own.
+	reason := stopReason(ctx)
 	cancel()
 
 	reportRecording(rec, src.streams)
 
 	if recErr != nil && !errors.Is(recErr, context.Canceled) {
 		return recErr
+	}
+	if *manifestOn {
+		if err := finishManifest(*dir, rec, src.streams, cf.demo, started, reason); err != nil {
+			return err
+		}
 	}
 	select {
 	case err := <-errs:
@@ -321,6 +344,35 @@ func runRecord(ctx context.Context, args []string) error {
 		}
 	default:
 	}
+	return nil
+}
+
+// finishManifest writes manifest.json for a finished recording and says so.
+func finishManifest(dir string, rec *record.Recorder, streams *sample.Set, demo bool, started time.Time, reason string) error {
+	files := rec.Files()
+	rows := rec.Rows()
+	rowsFor := func(path string) int {
+		for id, count := range rows {
+			if strings.Contains(filepath.Base(path), streams.MetaFor(id).Name+"_") {
+				return count
+			}
+		}
+		return 0
+	}
+	m := manifest{
+		Tool:        "gomuse",
+		StartedUTC:  started,
+		FinishedUTC: time.Now().UTC(),
+		StopReason:  reason,
+		Demo:        demo,
+		Dropped:     rec.Dropped(),
+		Malformed:   rec.Malformed(),
+	}
+	path, err := writeManifest(dir, m, files, rowsFor)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "manifest: %s\n", path)
 	return nil
 }
 
