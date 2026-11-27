@@ -131,6 +131,19 @@ Record for a fixed duration:
 gomuse record -dir ./data -duration 60s
 ```
 
+Driving gomuse from another program (this works on Windows, where a parent
+cannot send `Ctrl-C` to a child): add `-stdin-stop`, and write the line `stop`
+to gomuse's standard input when the recording should end. Closing the pipe has
+the same effect, so a crashed parent does not leave a recording running. Add
+`-manifest` to write `manifest.json` into the directory, listing every file with
+its size, row count and SHA-256, when and why the recording stopped
+(`stdin-stop`, `stdin-closed`, `duration`, `interrupt` or `source-ended`), and
+the number of dropped or malformed chunks:
+
+```sh
+gomuse record -dir ./data -stdin-stop -manifest
+```
+
 You can also view and record in the same session:
 
 ```sh
@@ -180,9 +193,11 @@ Common `stream` and `record` options:
 | `-acc=false` | enabled | Disable accelerometer data |
 | `-gyro=false` | enabled | Disable gyroscope data |
 
-`stream` also accepts `-port` (default `1111`) and `-record-dir`. `record`
-accepts `-dir` (default `.`) and `-duration` (default `0`, meaning until
-interrupted).
+`stream` also accepts `-port` (default `1111`), `-record-dir`, and `-host`
+(default empty, meaning every network interface; use `-host 127.0.0.1` to keep
+the viewer, which has no authentication, on the local computer). `record`
+accepts `-dir` (default `.`), `-duration` (default `0`, meaning until
+interrupted), `-stdin-stop` and `-manifest`.
 
 Run a command with `-h` for the complete built-in help:
 

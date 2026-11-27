@@ -69,6 +69,9 @@ streaming work with the headband on a table, and the signal will simply be noise
       accelerometer and gyroscope 52 Hz) to within a few percent over 30 s.
 - [ ] `Ctrl-C` during `gomuse record` ends the run and the last CSV row is
       complete.
+- [ ] `gomuse record -stdin-stop -manifest`, then typing `stop` and Enter, ends
+      the run, and `manifest.json` lists the files with `"stop_reason":
+      "stdin-stop"`. Compare one hash with `Get-FileHash`.
 - [ ] `gomuse stream -address <MAC from list>` connects without scanning.
 - [ ] Unplug nothing, but switch the headband off during `stream`: gomuse
       reports the loss and exits instead of hanging.
