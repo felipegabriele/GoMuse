@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -290,6 +291,7 @@ func runRecord(ctx context.Context, args []string) error {
 	dir := fs.String("dir", ".", "directory for the CSV files")
 	duration := fs.Duration("duration", 0, "stop after this long (0 means run until Ctrl-C)")
 	stdinStop := fs.Bool("stdin-stop", false, "stop and flush when a line \"stop\" arrives on stdin, or stdin closes (for a parent process; works on Windows)")
+	readyJSON := fs.Bool("ready-json", false, "write one JSON line to stdout when recording starts and one when it finishes (for a parent process)")
 	manifestOn := fs.Bool("manifest", false, "write manifest.json (file sizes, row counts, SHA-256, stop reason) into -dir when the recording ends")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -324,6 +326,12 @@ func runRecord(ctx context.Context, args []string) error {
 	errs := make(chan error, 2)
 	go func() { errs <- src.run(ctx) }()
 
+	var status io.Writer
+	if *readyJSON {
+		status = os.Stdout
+	}
+	emitStatus(status, statusEvent{Event: "recording", Dir: *dir, Demo: cf.demo})
+
 	// Run returns when the context is cancelled, having flushed and closed.
 	recErr := rec.Run(ctx, h)
 	// Read the reason before cancel() below, which would otherwise be taken
@@ -336,11 +344,15 @@ func runRecord(ctx context.Context, args []string) error {
 	if recErr != nil && !errors.Is(recErr, context.Canceled) {
 		return recErr
 	}
+	var manifestPath string
 	if *manifestOn {
-		if err := finishManifest(*dir, rec, src, cf.demo, started, reason); err != nil {
+		var err error
+		manifestPath, err = finishManifest(*dir, rec, src, cf.demo, started, reason)
+		if err != nil {
 			return err
 		}
 	}
+	emitStatus(status, statusEvent{Event: "finished", Dir: *dir, Demo: cf.demo, StopReason: reason, Manifest: manifestPath})
 	select {
 	case err := <-errs:
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -352,7 +364,7 @@ func runRecord(ctx context.Context, args []string) error {
 }
 
 // finishManifest writes manifest.json for a finished recording and says so.
-func finishManifest(dir string, rec *record.Recorder, src *source, demo bool, started time.Time, reason string) error {
+func finishManifest(dir string, rec *record.Recorder, src *source, demo bool, started time.Time, reason string) (string, error) {
 	streams := src.streams
 	files := rec.Files()
 	rows := rec.Rows()
@@ -378,10 +390,10 @@ func finishManifest(dir string, rec *record.Recorder, src *source, demo bool, st
 	}
 	path, err := writeManifest(dir, m, files, rowsFor)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintf(os.Stderr, "manifest: %s\n", path)
-	return nil
+	return path, nil
 }
 
 // reportRecording prints what was written, and warns loudly if rows were lost.
