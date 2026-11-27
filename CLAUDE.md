@@ -31,7 +31,7 @@ task run -- <any gomuse args>
 
 Extra flags go after `--` (`task stream -- -preset p21`); the port is a Taskfile var (`task stream PORT=8080`).
 
-`task demo` runs the entire pipeline (hub → filters → wire → browser) off `internal/synth`, so almost all development and manual verification can happen without a headband. Real BLE requires the terminal to have Bluetooth permission in macOS System Settings > Privacy & Security.
+`task demo` runs the entire pipeline (hub → filters → wire → browser) off `internal/synth`, so almost all development and manual verification can happen without a headband. Real BLE on macOS requires the terminal to have Bluetooth permission in System Settings > Privacy & Security; on Windows it needs only Bluetooth switched on. The only platform-specific code in this repo is the peripheral address type (`internal/muse/address_darwin.go` holds a CoreBluetooth UUID, `address_hwaddr.go` a MAC for Windows and Linux); everything else, including the BLE calls, goes through `tinygo.org/x/bluetooth`. Check the Windows build from any OS with `task check:windows`.
 
 There are no external test dependencies and no BLE-dependent tests; `task test` passes on any machine.
 

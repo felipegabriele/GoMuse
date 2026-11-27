@@ -82,6 +82,31 @@ tasks:
       - mkdir -p {{.BIN_DIR}}
       - go build -o {{.BIN}} {{.PKG}}
 
+  build:windows:
+    desc: Cross-compile bin/gomuse.exe for Windows (amd64); no Windows machine or cgo needed
+    sources:
+      - '**/*.go'
+      - internal/server/web/**/*
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}.exe'
+    env:
+      GOOS: windows
+      GOARCH: amd64
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -o {{.BIN}}.exe {{.PKG}}
+
+  check:windows:
+    desc: Vet and compile the tests for Windows, without running them
+    env:
+      GOOS: windows
+      GOARCH: amd64
+    cmds:
+      - go vet ./...
+      - go test -c -o /dev/null ./internal/muse
+
   install:
     desc: Install gomuse into GOBIN
     cmds:

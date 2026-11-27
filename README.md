@@ -22,16 +22,25 @@ environment, Lab Streaming Layer, or external web assets required.
 
 ## Requirements
 
-- macOS with Bluetooth enabled
+- macOS or Windows 10/11 with Bluetooth enabled
 - [Go 1.24](https://go.dev/dl/) or newer
 - A modern web browser
 - A Muse headband, unless you use demo mode
 - Optional: [Task](https://taskfile.dev/installation/) for the provided
   development commands
 
-Real-device access uses Apple's CoreBluetooth API. The terminal application
-running `gomuse` must have Bluetooth permission under **System Settings →
-Privacy & Security → Bluetooth**.
+On macOS, real-device access uses Apple's CoreBluetooth API. The terminal
+application running `gomuse` must have Bluetooth permission under **System
+Settings → Privacy & Security → Bluetooth**.
+
+On Windows, real-device access uses the WinRT Bluetooth LE interfaces, through
+the same Bluetooth library as macOS. Turn Bluetooth on in **Settings →
+Bluetooth & devices**. No driver or extra permission is needed, and no C
+compiler: the Go toolchain alone builds it. See
+[docs/WINDOWS.md](docs/WINDOWS.md) for setup, differences from macOS and a
+hardware test checklist. The Windows port compiles and vets cleanly, but it has
+not yet been run against a real headband; `docs/WINDOWS.md` lists what still
+has to be confirmed.
 
 ## Quick start
 
@@ -78,15 +87,19 @@ gomuse stream
 ```
 
 For a predictable connection when several headbands are nearby, select one by
-name or by the CoreBluetooth UUID printed by `list`:
+name or by the address printed by `list`:
 
 ```sh
 gomuse stream -name MuseS-4A2B
-gomuse stream -address 01234567-89AB-CDEF-0123-456789ABCDEF
+gomuse stream -address 01234567-89AB-CDEF-0123-456789ABCDEF   # macOS
+gomuse stream -address 00:55:DA:B0:12:34                      # Windows
 ```
 
-The UUID is assigned by CoreBluetooth on the local Mac. It is not a Bluetooth
-MAC address and is not portable to another computer.
+On macOS the address is a UUID assigned by CoreBluetooth on the local Mac. It
+is not a Bluetooth MAC address and is not portable to another computer. On
+Windows it is the headband's Bluetooth MAC address, which is the same on every
+computer; `AA-BB-CC-DD-EE-FF` and `AABBCCDDEEFF` are accepted as well as the
+colon form.
 
 ### Supported data
 
@@ -155,7 +168,7 @@ Common `stream` and `record` options:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-address UUID` | scan | Connect using a CoreBluetooth peripheral UUID |
+| `-address ADDRESS` | scan | Connect using a peripheral address: a CoreBluetooth UUID on macOS, a Bluetooth MAC address on Windows |
 | `-name NAME` | strongest device | Match an advertised device name |
 | `-scan-timeout DURATION` | `10s` | Limit discovery time |
 | `-preset PRESET` | automatic | Select a headband preset |

@@ -15,7 +15,8 @@ import (
 )
 
 // adapter is the process-wide BLE adapter. CoreBluetooth allows only one
-// central manager per process, so this is enabled once and shared.
+// central manager per process, and WinRT's Enable initialises COM for the whole
+// process, so this is enabled once and shared on every platform.
 var (
 	adapter     = bluetooth.DefaultAdapter
 	adapterOnce sync.Once
@@ -31,9 +32,11 @@ func enableAdapter() error {
 type Found struct {
 	// Name is the advertised local name, e.g. "MuseS-1234".
 	Name string
-	// Address on macOS is a CoreBluetooth peripheral UUID, not a MAC address.
-	// It is assigned per-host, so it is stable on this Mac but meaningless
-	// on another one.
+	// Address is the platform's own peripheral identifier, in the text form
+	// parseAddress accepts. On macOS that is a CoreBluetooth peripheral UUID,
+	// not a MAC address: it is assigned per-host, so it is stable on this Mac
+	// but meaningless on another one. On Windows and Linux it is the
+	// headband's Bluetooth MAC address, which is the same on every computer.
 	Address string
 	RSSI    int16
 }
@@ -96,7 +99,8 @@ func Scan(ctx context.Context, timeout time.Duration) ([]Found, error) {
 
 // Config selects a device and the streams to subscribe to.
 type Config struct {
-	// Address is a CoreBluetooth peripheral UUID. If empty, Name is used.
+	// Address is a peripheral address as described by AddressHelp. If empty,
+	// Name is used.
 	Address string
 	// Name matches the advertised local name case-insensitively as a
 	// substring. If both Address and Name are empty, the strongest Muse
@@ -218,17 +222,8 @@ func Connect(ctx context.Context, cfg Config, publish func(sample.Chunk)) (*Clie
 // resolveAddress turns a Config into a concrete peripheral address, scanning
 // only when one was not supplied outright.
 func resolveAddress(ctx context.Context, cfg Config) (bluetooth.Address, error) {
-	var addr bluetooth.Address
-
 	if cfg.Address != "" {
-		// Address.Set swallows parse errors, so parse explicitly: a typo
-		// should be an error, not a silent scan for the zero UUID.
-		uuid, err := bluetooth.ParseUUID(cfg.Address)
-		if err != nil {
-			return addr, fmt.Errorf("parse address %q: %w", cfg.Address, err)
-		}
-		addr.UUID = uuid
-		return addr, nil
+		return parseAddress(cfg.Address)
 	}
 
 	timeout := cfg.ScanTimeout
@@ -237,36 +232,37 @@ func resolveAddress(ctx context.Context, cfg Config) (bluetooth.Address, error) 
 	}
 	found, err := Scan(ctx, timeout)
 	if err != nil {
-		return addr, err
+		return bluetooth.Address{}, err
 	}
 	if len(found) == 0 {
-		return addr, errors.New("muse: no headband found (is it powered on?)")
+		return bluetooth.Address{}, errors.New("muse: no headband found (is it powered on?)")
 	}
 
 	if cfg.Name != "" {
 		want := strings.ToLower(cfg.Name)
 		for _, f := range found {
 			if strings.Contains(strings.ToLower(f.Name), want) {
-				return bluetooth.Address{UUID: mustUUID(f.Address)}, nil
+				return scannedAddress(f)
 			}
 		}
 		names := make([]string, len(found))
 		for i, f := range found {
 			names[i] = f.Name
 		}
-		return addr, fmt.Errorf("muse: no headband matching %q; found %s", cfg.Name, strings.Join(names, ", "))
+		return bluetooth.Address{}, fmt.Errorf("muse: no headband matching %q; found %s", cfg.Name, strings.Join(names, ", "))
 	}
-	return bluetooth.Address{UUID: mustUUID(found[0].Address)}, nil
+	return scannedAddress(found[0])
 }
 
-// mustUUID re-parses an address string that came from a scan result, so it is
-// known-good by construction.
-func mustUUID(s string) bluetooth.UUID {
-	u, err := bluetooth.ParseUUID(s)
+// scannedAddress re-parses the address string of a scan result. It was produced
+// by this platform's own Address.String, so a failure means the two halves of
+// the platform layer disagree; report it rather than connect to a zero address.
+func scannedAddress(f Found) (bluetooth.Address, error) {
+	addr, err := parseAddress(f.Address)
 	if err != nil {
-		panic("muse: scan produced an unparseable address: " + s)
+		return bluetooth.Address{}, fmt.Errorf("muse: scan produced an unusable address for %q: %w", f.Name, err)
 	}
-	return u
+	return addr, nil
 }
 
 // setup discovers the Interaxon service, wires up notifications, and starts
