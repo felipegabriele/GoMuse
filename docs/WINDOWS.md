@@ -69,6 +69,10 @@ streaming work with the headband on a table, and the signal will simply be noise
       accelerometer and gyroscope 52 Hz) to within a few percent over 30 s.
 - [ ] `Ctrl-C` during `gomuse record` ends the run and the last CSV row is
       complete.
+- [ ] `manifest.json` has a `timing` section with `clock` equal to
+      `host-wall-clock`, an estimated EEG rate close to 256 Hz, and an empty
+      `clock_jumps` list. Changing the Windows clock by hand during a recording
+      adds an entry and prints a warning.
 - [ ] `gomuse record -stdin-stop -manifest`, then typing `stop` and Enter, ends
       the run, and `manifest.json` lists the files with `"stop_reason":
       "stdin-stop"`. Compare one hash with `Get-FileHash`.

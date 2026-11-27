@@ -130,6 +130,9 @@ type source struct {
 	// battery reports the charge level and whether it is known yet. Never nil
 	// here, but the server treats nil as "this source has no battery".
 	battery func() (float64, bool)
+	// timing reports how the timestamps were produced. Nil for the synthetic
+	// source, which has no headband and nothing to report.
+	timing func() *muse.Timing
 }
 
 // start brings up either a real headband or the synthetic generator.
@@ -191,6 +194,7 @@ func (c *connFlags) start(ctx context.Context, h *hub.Hub) (*source, error) {
 		stop:    func() { _ = client.Close() },
 		streams: client.Streams(),
 		battery: client.Battery,
+		timing:  client.Timing,
 	}, nil
 }
 
@@ -333,7 +337,7 @@ func runRecord(ctx context.Context, args []string) error {
 		return recErr
 	}
 	if *manifestOn {
-		if err := finishManifest(*dir, rec, src.streams, cf.demo, started, reason); err != nil {
+		if err := finishManifest(*dir, rec, src, cf.demo, started, reason); err != nil {
 			return err
 		}
 	}
@@ -348,7 +352,8 @@ func runRecord(ctx context.Context, args []string) error {
 }
 
 // finishManifest writes manifest.json for a finished recording and says so.
-func finishManifest(dir string, rec *record.Recorder, streams *sample.Set, demo bool, started time.Time, reason string) error {
+func finishManifest(dir string, rec *record.Recorder, src *source, demo bool, started time.Time, reason string) error {
+	streams := src.streams
 	files := rec.Files()
 	rows := rec.Rows()
 	rowsFor := func(path string) int {
@@ -367,6 +372,9 @@ func finishManifest(dir string, rec *record.Recorder, streams *sample.Set, demo 
 		Demo:        demo,
 		Dropped:     rec.Dropped(),
 		Malformed:   rec.Malformed(),
+	}
+	if src.timing != nil {
+		m.Timing = src.timing()
 	}
 	path, err := writeManifest(dir, m, files, rowsFor)
 	if err != nil {

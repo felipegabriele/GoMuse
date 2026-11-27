@@ -138,7 +138,11 @@ the same effect, so a crashed parent does not leave a recording running. Add
 `-manifest` to write `manifest.json` into the directory, listing every file with
 its size, row count and SHA-256, when and why the recording stopped
 (`stdin-stop`, `stdin-closed`, `duration`, `interrupt` or `source-ended`), and
-the number of dropped or malformed chunks:
+the number of dropped or malformed chunks. With a real headband it also records
+how the timestamps were produced: the clock they come from (the computer's wall
+clock, never the headband's), the timestamp of each stream's first sample, the
+sample period the fit estimated against the nominal one, and any step of the
+computer's clock seen during the run:
 
 ```sh
 gomuse record -dir ./data -stdin-stop -manifest
