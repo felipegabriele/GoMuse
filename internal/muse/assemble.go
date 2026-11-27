@@ -141,3 +141,14 @@ func (a *assembler) remove(tm uint16) {
 		}
 	}
 }
+
+// timing reports how this stream's timestamps were produced, and whether any
+// packet has completed yet.
+func (a *assembler) timing() (StreamTiming, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.dej == nil {
+		return StreamTiming{}, false
+	}
+	return a.dej.timing(a.meta.Name, a.meta.Rate), true
+}

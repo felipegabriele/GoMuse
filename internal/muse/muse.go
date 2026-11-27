@@ -161,7 +161,42 @@ type Client struct {
 	mu       sync.Mutex
 	lastData time.Time
 
+	// Timing bookkeeping: the assemblers of the classic EEG and PPG streams,
+	// the arrival-stamped IMU streams, and a watch for steps of the system
+	// clock. All are read by Timing.
+	assemblers []*assembler
+	imu        map[sample.StreamID]*arrivalStat
+	clock      *clockWatch
+	clockStart time.Time
+
 	closeOnce sync.Once
+}
+
+// Timing reports how each stream's timestamps were produced and any steps of
+// the computer's clock seen so far. It is safe to call while streaming, and
+// meant to be called once more after the run ends, for the manifest.
+func (c *Client) Timing() *Timing {
+	t := &Timing{Streams: []StreamTiming{}, ClockJumps: []ClockJump{}}
+	if c.athena != nil {
+		t.Streams = append(t.Streams, c.athena.timing()...)
+	}
+	for _, a := range c.assemblers {
+		if st, ok := a.timing(); ok {
+			t.Streams = append(t.Streams, st)
+		}
+	}
+	for _, id := range []sample.StreamID{sample.ACC, sample.Gyro} {
+		if a, ok := c.imu[id]; ok {
+			m := sample.MetaFor(id)
+			if st := a.timing(m.Name, m.Rate); st.Samples > 0 {
+				t.Streams = append(t.Streams, st)
+			}
+		}
+	}
+	if c.clock != nil {
+		t.ClockJumps = c.clock.list()
+	}
+	return t
 }
 
 // Streams returns the metadata of the connected headband's streams. It is
@@ -212,6 +247,11 @@ func Connect(ctx context.Context, cfg Config, publish func(sample.Chunk)) (*Clie
 	}
 
 	c := &Client{dev: dev, publish: publish, lastData: time.Now(), warnf: cfg.Warn}
+	c.clockStart = time.Now()
+	c.clock = newClockWatch(c.clockStart, func(j ClockJump) {
+		c.warn(fmt.Sprintf("the computer's clock jumped by %.0f ms during the recording; timestamps after this point are shifted relative to those before it", j.Ms))
+	})
+	c.imu = map[sample.StreamID]*arrivalStat{}
 	if err := c.setup(cfg); err != nil {
 		_ = dev.Disconnect()
 		return nil, err
@@ -506,6 +546,7 @@ func (c *Client) preset(cfg Config) []byte {
 func (c *Client) subscribeStreams(chars map[string]bluetooth.DeviceCharacteristic, cfg Config) error {
 	if cfg.wants(sample.EEG) {
 		asm := newAssembler(sample.EEG, c.publish, c.touch)
+		c.assemblers = append(c.assemblers, asm)
 		for i, uuid := range EEGChannelUUIDs {
 			ch, ok := chars[uuid]
 			if !ok {
@@ -519,6 +560,7 @@ func (c *Client) subscribeStreams(chars map[string]bluetooth.DeviceCharacteristi
 
 	if cfg.wants(sample.PPG) {
 		asm := newAssembler(sample.PPG, c.publish, c.touch)
+		c.assemblers = append(c.assemblers, asm)
 		for i, uuid := range PPGChannelUUIDs {
 			ch, ok := chars[uuid]
 			if !ok {
@@ -606,6 +648,8 @@ func (c *Client) notifyIMU(
 	}
 	meta := sample.MetaFor(id)
 	period := meta.Period()
+	stat := &arrivalStat{}
+	c.imu[id] = stat
 
 	err := ch.EnableNotifications(func(buf []byte) {
 		_, triples, err := DecodeIMU(buf, scale)
@@ -632,6 +676,9 @@ func (c *Client) notifyIMU(
 				col[i] = t[axis]
 			}
 			data[axis] = col
+		}
+		if n > 0 {
+			stat.add(ts[0], n)
 		}
 		c.publish(sample.Chunk{Stream: id, Timestamps: ts, Data: data})
 	})
@@ -668,6 +715,9 @@ func (c *Client) Run(ctx context.Context) error {
 				return fmt.Errorf("keep-alive: %w", err)
 			}
 		case <-watchdog.C:
+			if c.clock != nil {
+				c.clock.tick(c.clockStart)
+			}
 			c.mu.Lock()
 			idle := time.Since(c.lastData)
 			c.mu.Unlock()

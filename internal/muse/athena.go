@@ -525,3 +525,17 @@ func (c *Client) setupAthena(chars map[string]bluetooth.DeviceCharacteristic, cf
 
 // athenaCommandGap is the pause muse-lsl leaves between control commands.
 const athenaCommandGap = 200 * time.Millisecond
+
+// timing reports the fit of every stream that has produced a packet.
+func (a *athenaStreamer) timing() []StreamTiming {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []StreamTiming
+	for _, id := range sample.Athena().All() {
+		if d, ok := a.dejitters[id]; ok {
+			m := sample.MetaFor(id)
+			out = append(out, d.timing(m.Name, m.Rate))
+		}
+	}
+	return out
+}

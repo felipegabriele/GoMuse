@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"gomuse/internal/muse"
 )
 
 // manifestFile is one recorded file as listed in the manifest.
@@ -22,14 +24,17 @@ type manifestFile struct {
 // manifest describes one recording: what was written, when, how it ended, and
 // a SHA-256 of every file, so a later copy can be checked against the original.
 type manifest struct {
-	Tool        string         `json:"tool"`
-	StartedUTC  time.Time      `json:"started_utc"`
-	FinishedUTC time.Time      `json:"finished_utc"`
-	StopReason  string         `json:"stop_reason"`
-	Demo        bool           `json:"demo"`
-	Dropped     uint64         `json:"dropped_chunks"`
-	Malformed   int            `json:"malformed_chunks"`
-	Files       []manifestFile `json:"files"`
+	Tool        string    `json:"tool"`
+	StartedUTC  time.Time `json:"started_utc"`
+	FinishedUTC time.Time `json:"finished_utc"`
+	StopReason  string    `json:"stop_reason"`
+	Demo        bool      `json:"demo"`
+	Dropped     uint64    `json:"dropped_chunks"`
+	Malformed   int       `json:"malformed_chunks"`
+	// Timing says how the timestamps in the CSV files were produced. Absent in
+	// demo mode, which has no headband.
+	Timing *muse.Timing   `json:"timing,omitempty"`
+	Files  []manifestFile `json:"files"`
 }
 
 // hashFile returns the SHA-256 and size of the file at path.

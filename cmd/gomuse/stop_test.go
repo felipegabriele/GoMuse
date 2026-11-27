@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gomuse/internal/muse"
 )
 
 func waitDone(t *testing.T, ctx context.Context) {
@@ -92,7 +94,33 @@ func TestWriteManifest(t *testing.T) {
 	if want := "8f662aa70871d8cb7d50d8e5397c78c2c8f2975375aa8b3e0cefc3bbc2d4c157"; m.Files[0].SHA256 != want {
 		t.Errorf("sha256 = %s, want %s", m.Files[0].SHA256, want)
 	}
+	if m.Timing != nil {
+		t.Errorf("timing should be absent when not supplied: %+v", m.Timing)
+	}
 	if _, err := os.Stat(out + ".tmp"); err == nil {
 		t.Error("temporary manifest file left behind")
+	}
+}
+
+func TestWriteManifestIncludesTiming(t *testing.T) {
+	dir := t.TempDir()
+	tm := &muse.Timing{
+		Streams:    []muse.StreamTiming{{Stream: "eeg", Method: "rls-fit", Clock: muse.ClockHost, NominalRateHz: 256, AnchorUnixS: 1.5, EstimatedPeriodS: 0.0039, EstimatedRateHz: 256.4, Samples: 100}},
+		ClockJumps: []muse.ClockJump{{AtUnixS: 2, Ms: -120}},
+	}
+	out, err := writeManifest(dir, manifest{Tool: "gomuse", Timing: tm}, nil, func(string) int { return 0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(out)
+	var m manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Timing == nil || len(m.Timing.Streams) != 1 || m.Timing.Streams[0].AnchorUnixS != 1.5 || len(m.Timing.ClockJumps) != 1 || m.Timing.ClockJumps[0].Ms != -120 {
+		t.Fatalf("timing did not round-trip: %+v", m.Timing)
+	}
+	if !strings.Contains(string(data), `"clock": "host-wall-clock"`) {
+		t.Errorf("clock source missing from the manifest:\n%s", data)
 	}
 }
