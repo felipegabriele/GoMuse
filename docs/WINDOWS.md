@@ -73,6 +73,10 @@ streaming work with the headband on a table, and the signal will simply be noise
       `host-wall-clock`, an estimated EEG rate close to 256 Hz, and an empty
       `clock_jumps` list. Changing the Windows clock by hand during a recording
       adds an entry and prints a warning.
+- [ ] `gomuse record -stdin-stop -manifest -ready-json` prints a `recording`
+      line when it starts and a `finished` line, with `"stop_reason":
+      "stdin-stop"`, after `stop` is typed. Standard error still carries the
+      human messages.
 - [ ] `gomuse record -stdin-stop -manifest`, then typing `stop` and Enter, ends
       the run, and `manifest.json` lists the files with `"stop_reason":
       "stdin-stop"`. Compare one hash with `Get-FileHash`.

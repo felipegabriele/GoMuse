@@ -148,6 +148,14 @@ computer's clock seen during the run:
 gomuse record -dir ./data -stdin-stop -manifest
 ```
 
+A parent process can also read progress without parsing the messages on standard
+error: `-ready-json` writes one JSON line to standard output when the stream has
+been started (`"event":"recording"`) and one when the recording ends
+(`"event":"finished"`, with the stop reason and the manifest path). Both carry
+`unix_us`, the computer's clock in microseconds, which is the clock of the CSV
+timestamps. The first sample can follow the `recording` line by a moment; its
+exact timestamp is in the manifest.
+
 You can also view and record in the same session:
 
 ```sh
@@ -201,7 +209,7 @@ Common `stream` and `record` options:
 (default empty, meaning every network interface; use `-host 127.0.0.1` to keep
 the viewer, which has no authentication, on the local computer). `record`
 accepts `-dir` (default `.`), `-duration` (default `0`, meaning until
-interrupted), `-stdin-stop` and `-manifest`.
+interrupted), `-stdin-stop`, `-manifest` and `-ready-json`.
 
 Run a command with `-h` for the complete built-in help:
 

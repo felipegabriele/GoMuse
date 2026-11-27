@@ -124,3 +124,33 @@ func TestWriteManifestIncludesTiming(t *testing.T) {
 		t.Errorf("clock source missing from the manifest:\n%s", data)
 	}
 }
+
+func TestEmitStatusWritesOneJSONLine(t *testing.T) {
+	var buf strings.Builder
+	emitStatus(&buf, statusEvent{Event: "finished", Dir: "d", StopReason: "stdin-stop", Manifest: "d/manifest.json", UnixUS: 5})
+	line := buf.String()
+	if strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") {
+		t.Fatalf("want exactly one newline-terminated line, got %q", line)
+	}
+	var ev statusEvent
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Event != "finished" || ev.UnixUS != 5 || ev.StopReason != "stdin-stop" || ev.Manifest != "d/manifest.json" {
+		t.Errorf("round trip lost data: %+v", ev)
+	}
+	emitStatus(nil, statusEvent{Event: "recording"}) // must not panic
+}
+
+func TestEmitStatusStampsTheClock(t *testing.T) {
+	var buf strings.Builder
+	before := time.Now().UnixMicro()
+	emitStatus(&buf, statusEvent{Event: "recording"})
+	var ev statusEvent
+	if err := json.Unmarshal([]byte(buf.String()), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.UnixUS < before || ev.UnixUS > time.Now().UnixMicro() {
+		t.Errorf("unix_us %d outside [%d, now]", ev.UnixUS, before)
+	}
+}
