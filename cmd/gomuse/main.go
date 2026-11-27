@@ -81,7 +81,7 @@ type connFlags struct {
 }
 
 func (c *connFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&c.address, "address", "", "CoreBluetooth peripheral UUID (see `gomuse list`)")
+	fs.StringVar(&c.address, "address", "", "peripheral address: "+muse.AddressHelp+" (see `gomuse list`)")
 	fs.StringVar(&c.name, "name", "", "match the headband by name, e.g. MuseS-4A2B")
 	fs.StringVar(&c.preset, "preset", "", "headband preset (default p50 with PPG, p21 without)")
 	fs.BoolVar(&c.disableLight, "disable-light", false, "turn off the indicator LED (Muse S)")
